@@ -2,6 +2,10 @@ from celery import Celery
 from backend.config import settings
 
 celery_app = Celery("migrationguard", broker=settings.redis_url, backend=settings.redis_url)
+celery_app.conf.update(
+    task_always_eager=settings.celery_task_always_eager
+    or settings.app_env.lower() in {"development", "dev", "test"}
+)
 
 @celery_app.task(
     bind=True,

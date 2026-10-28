@@ -144,7 +144,7 @@ export function useRunEvents(runId: string) {
     const connect = () => {
       const token = getToken()
       if (!token) return
-      source = new EventSource(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'}/runs/${runId}/events?token=${encodeURIComponent(token)}`)
+      source = new EventSource(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/runs/${runId}/events?token=${encodeURIComponent(token)}`)
       source.onopen = () => { setConnected(true); retry.current = 0 }
       source.onmessage = (message) => setEvent(JSON.parse(message.data) as Record<string, unknown>)
       source.onerror = () => {

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +40,16 @@ from .llm.providers import FakeProvider
 _llm_requests: dict[str, list[float]] = {}
 
 app=FastAPI(title='MigrationGuard API', version='1.0.0')
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 async def _ai_artifacts(run_id: str, db: AsyncSession) -> dict:
     builds = list((await db.scalars(select(BuildRun).where(BuildRun.run_id == run_id))).all())

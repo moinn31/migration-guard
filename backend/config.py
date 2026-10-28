@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./migrationguard.db"
     redis_url: str = "redis://localhost:6379/0"
+    celery_task_always_eager: bool = False
     jwt_secret: str = "local-development-only-change-me"
     jwt_expire_minutes: int = 60
     app_env: str = "development"
