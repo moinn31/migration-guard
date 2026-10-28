@@ -1,0 +1,15 @@
+name: MigrationGuard verify
+description: Run MigrationGuard verification and fail on unsafe or inconclusive results
+inputs:
+  api:
+    required: true
+  token:
+    required: true
+  repo:
+    required: false
+    default: ${{ github.server_url }}/${{ github.repository }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python -m migrationguard verify --repo "${{ inputs.repo }}" --target 17 --api "${{ inputs.api }}" --token "${{ inputs.token }}" --fail-on UNSAFE,INCONCLUSIVE

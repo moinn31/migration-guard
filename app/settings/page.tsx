@@ -1,0 +1,2 @@
+import { AppShell, PageHeader } from '@/components/app-shell'
+export default function SettingsPage() { return <AppShell><PageHeader eyebrow="Workspace" title="Settings" /><div className="p-6 lg:p-10"><section className="max-w-2xl rounded-2xl border border-white/[0.08] bg-white/[0.035] p-6"><h2 className="font-semibold text-white">Execution policy</h2><p className="mt-2 text-sm text-slate-500">Docker execution, OpenRewrite recipe pins, and AI provider settings are managed by the backend environment.</p></section></div></AppShell> }

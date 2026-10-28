@@ -1,0 +1,11 @@
+seed: 20261027
+max_workers: 2
+subset_size: 10
+benchmark: AmazonScience/migration-bench-java-selected
+systems:
+  - plain_build_test
+  - openrewrite
+  - llm_only
+  - migrationguard
+outputs: results/
+notes: Deterministic checks decide verdicts; LLM outputs remain unverified evidence.

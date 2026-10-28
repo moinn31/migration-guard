@@ -1,0 +1,6 @@
+'use client'
+import { useParams } from 'next/navigation'
+import { RunShell } from '@/components/run-shell'
+import { LoadingState } from '@/components/app-shell'
+import { useReport } from '@/lib/api/hooks'
+export default function ReportPage() { const { id } = useParams<{ id: string }>(); const query = useReport(id); const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'; return <RunShell title="Evidence report"><div className="p-6 lg:p-10">{query.isLoading ? <LoadingState /> : <section className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-6"><div className="flex flex-wrap gap-3"><a className="rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300" href={`${base}/runs/${id}/report`}>JSON</a><a className="rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300" href={`${base}/runs/${id}/report.md`}>Markdown</a><a className="rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300" href={`${base}/runs/${id}/report.html`}>HTML</a><a className="rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300" href={`${base}/runs/${id}/report.pdf`}>PDF</a></div><pre className="mt-6 max-h-[70vh] overflow-auto rounded-xl bg-black/30 p-5 text-xs leading-6 text-slate-400">{JSON.stringify(query.data?.content ?? {}, null, 2)}</pre></section>}</div></RunShell> }
