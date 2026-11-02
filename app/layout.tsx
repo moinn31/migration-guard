@@ -1,5 +1,5 @@
 import { ClerkProvider } from '@clerk/nextjs'
-import { shadcn } from '@clerk/ui/themes'
+import { dark, shadcn } from '@clerk/ui/themes'
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
@@ -22,7 +22,19 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en" className="dark">
       <body className="antialiased">
-        <ClerkProvider appearance={{ theme: shadcn }}>
+        <ClerkProvider
+          appearance={{
+            theme: [dark, shadcn],
+            variables: {
+              colorBackground: '#11151d',
+              colorInput: '#181e2b',
+              colorNeutral: '#f8fafc',
+              colorPrimary: '#67e8f9',
+              colorPrimaryForeground: '#080a0f',
+              colorForeground: '#f8fafc',
+            },
+          }}
+        >
           <Providers>{children}</Providers>
         </ClerkProvider>
         {process.env.NODE_ENV === 'production' && <Analytics />}

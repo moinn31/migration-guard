@@ -8,18 +8,82 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-border: var(--border);
   --color-ring: var(--ring);
+  --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
   --radius-lg: 0.75rem;
   --radius-xl: 1rem;
   --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
-:root { --background: #080a0f; --foreground: #f8fafc; --border: rgba(255,255,255,.1); --ring: #67e8f9; --muted-foreground: #94a3b8; }
+:root {
+  --background: #080a0f;
+  --foreground: #f8fafc;
+  --card: #11151d;
+  --card-foreground: #f8fafc;
+  --popover: #11151d;
+  --popover-foreground: #f8fafc;
+  --muted: #181e2b;
+  --muted-foreground: #94a3b8;
+  --input: #1e2638;
+  --border: rgba(255, 255, 255, 0.1);
+  --ring: #67e8f9;
+  --primary: #67e8f9;
+  --primary-foreground: #080a0f;
+  --destructive: #ef4444;
+}
+
 * { box-sizing: border-box; border-color: var(--border); }
 html { background: var(--background); }
 body { margin: 0; background: var(--background); color: var(--foreground); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
 button, input { font: inherit; }
 ::selection { background: rgba(103,232,249,.2); }
+
+/* Clerk Modal, Popover and Card background fixes */
+.cl-userButtonPopoverCard,
+.cl-userProfile-root,
+.cl-modalContent,
+.cl-card,
+.cl-popoverBox,
+.cl-cardBox {
+  background-color: #11151d !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8) !important;
+}
+
+.cl-userProfile-root .cl-navbar {
+  background-color: #0c0f15 !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+.cl-userProfile-root .cl-pageScrollBox {
+  background-color: #11151d !important;
+}
+
+.cl-userButtonPopoverActions,
+.cl-userButtonPopoverFooter {
+  background-color: #11151d !important;
+}
+
+.cl-modalBackdrop {
+  background-color: rgba(0, 0, 0, 0.8) !important;
+  backdrop-filter: blur(6px) !important;
+}
+
+/* Ensure GitHub icon in Clerk Social Buttons is visible on dark background */
+.cl-socialButtonsBlockButton__github svg,
+.cl-socialButtonsBlockButton__github img,
+button[data-provider="github"] svg,
+button[data-provider="github"] img,
+[data-localization-key*="github"] svg,
+.cl-socialButtonsProviderIcon__github {
+  filter: invert(1) brightness(2) !important;
+}
