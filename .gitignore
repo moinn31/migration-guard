@@ -18,3 +18,4 @@ __pycache__/
 *.db
 results/
 .DS_Store
+.neon
