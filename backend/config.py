@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     github_token: str | None = None
     report_share_secret: str = "local-development-report-secret"
     llm_rate_limit_per_minute: int = 10
+    
+    # Clerk Authentication
+    clerk_secret_key: str | None = None
+
+    # Azure Container Apps Jobs
+    azure_enabled: bool = True
+    azure_subscription_id: str = "dea7d5c6-4a09-488a-9d67-e9445fe6586f"
+    azure_resource_group: str = "rg-migration-platform"
+    azure_containerapps_environment: str = "env-migration-standard"
+    azure_containerapps_job_name: str = "migration-worker"
+    azure_location: str = "centralindia"
+
     model_config = SettingsConfigDict(env_file=(".env", ".env.development.local"), extra="ignore")
 
     @model_validator(mode="after")

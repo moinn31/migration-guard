@@ -17,7 +17,7 @@ import {
   FolderGit2,
 } from 'lucide-react'
 import { AppShell, PageHeader } from '@/components/app-shell'
-import { api } from '@/lib/api/client'
+import { api, getActiveToken } from '@/lib/api/client'
 
 interface GithubRepo {
   id: number
@@ -132,20 +132,33 @@ export default function NewProjectPage() {
   async function handleImportRepo(repo: GithubRepo) {
     setImportingRepoId(repo.id)
     try {
-      const { data, error } = await api.POST('/projects', {
-        body: {
+      const authToken = await getActiveToken()
+      const ghToken = localStorage.getItem('migrationguard_github_token') || ''
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`
+
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/import`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
           name: repo.name,
           repository_url: repo.html_url,
-        },
+          repository_id: String(repo.id),
+          repository_owner: repo.owner.login,
+          default_branch: repo.default_branch || 'main',
+          github_token: ghToken || undefined,
+        }),
       })
-      if (data) {
-        router.push(`/projects/${data.id}/new`)
+
+      const data = await res.json()
+      if (res.ok && data.project_id) {
+        router.push(`/workspace/${data.project_id}`)
       } else {
-        alert(error ? 'Failed to create project: ' + JSON.stringify(error) : 'Unable to create project.')
+        alert(data.message || data.detail || 'Failed to start repository import.')
       }
     } catch (err) {
       console.error(err)
-      alert('Error importing project.')
+      alert('Error connecting to backend API.')
     } finally {
       setImportingRepoId(null)
     }
@@ -156,16 +169,27 @@ export default function NewProjectPage() {
     if (!manualName.trim()) return
     setManualError('')
     try {
-      const { data } = await api.POST('/projects', {
-        body: {
+      const authToken = await getActiveToken()
+      const ghToken = localStorage.getItem('migrationguard_github_token') || ''
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`
+
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/import`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
           name: manualName.trim(),
           repository_url: manualUrl.trim() || null,
-        },
+          default_branch: 'main',
+          github_token: ghToken || undefined,
+        }),
       })
-      if (data) {
-        router.push(`/projects/${data.id}/new`)
+
+      const data = await res.json()
+      if (res.ok && data.project_id) {
+        router.push(`/workspace/${data.project_id}`)
       } else {
-        setManualError('Unable to create project.')
+        setManualError(data.message || data.detail || 'Unable to import project.')
       }
     } catch {
       setManualError('Error creating project.')

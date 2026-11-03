@@ -25,8 +25,10 @@ from .migration_assistance import build_java17_plan, explain_proposal
 from .phase5_schemas import MigrationPlanOut, MigrationProposalOut
 from .phase6_schemas import RiskAssessmentOut, ReportOut, ApprovalRequest, ApprovalOut
 from .risk_assessment import assess_run_breakdown
-from .models import Approval, AuditLog, Report, ReportShare, RiskAssessment, Role, MigrationChange, TestResult, TestIntegrityResult
-from .schemas import UserCreate, Token, ProjectCreate, ProjectOut, RunOut
+from .models import Approval, AuditLog, Report, ReportShare, RiskAssessment, Role, MigrationChange, TestResult, TestIntegrityResult, ProjectFile
+from .schemas import UserCreate, Token, ProjectCreate, ProjectOut, RunOut, ProjectImportRequest, ProjectImportOut, FileItemOut, FileContentOut
+from .repo_service import clone_and_persist_repository
+from .azure_client import azure_job_service
 from .phase2_schemas import SnapshotOut, FindingOut, RunDetailOut
 from .auth import hash_password, verify_password, create_token, current_user, oauth2, require_roles
 from .ingestion import create_snapshot_and_findings
@@ -118,6 +120,147 @@ async def login(data: UserCreate, db: AsyncSession=Depends(get_db)):
     user=await db.scalar(select(User).where(User.email==data.email))
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,'Invalid credentials')
     return Token(access_token=create_token(user))
+@app.post('/api/projects/import', response_model=ProjectImportOut)
+async def import_project(
+    data: ProjectImportRequest,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    project = await db.scalar(
+        select(Project).where(Project.owner_id == user.id, Project.repository_url == data.repository_url)
+    )
+    if not project:
+        project = Project(
+            name=data.name,
+            repository_url=data.repository_url,
+            owner_id=user.id
+        )
+        db.add(project)
+        await db.flush()
+
+    run = MigrationRun(
+        project_id=project.id,
+        created_by=user.id,
+        state=RunState.STARTING,
+        repository_id=data.repository_id,
+        repository_owner=data.repository_owner,
+        repository_name=data.name,
+        default_branch=data.default_branch or "main",
+        requested_branch=data.default_branch or "main",
+        status_message="Preparing execution environment..."
+    )
+    db.add(run)
+    await db.flush()
+    db.add_all([RunStage(run_id=run.id, stage_name=name, status=StageStatus.PENDING) for name in StageName])
+    await db.commit()
+    await db.refresh(run)
+
+    # Trigger Azure Container Apps Job execution in background
+    try:
+        azure_execution_id = azure_job_service.trigger_job(
+            job_id=run.id,
+            backend_url="http://127.0.0.1:8000",
+            job_token=secrets.token_urlsafe(32)
+        )
+        if azure_execution_id:
+            run.azure_execution_id = azure_execution_id
+            await db.commit()
+    except Exception as exc:
+        pass
+
+    # Launch clone & file persistence to Neon Postgres in background
+    asyncio.create_task(
+        clone_and_persist_repository(
+            project_id=project.id,
+            run_id=run.id,
+            repository_url=data.repository_url,
+            branch=data.default_branch,
+            github_token=data.github_token or settings.github_token,
+        )
+    )
+
+    return ProjectImportOut(
+        project_id=project.id,
+        run_id=run.id,
+        name=project.name,
+        repository_url=project.repository_url,
+        state=run.state,
+        status_message=run.status_message
+    )
+
+@app.get('/api/projects/{project_id}/files', response_model=list[FileItemOut])
+async def get_project_files(
+    project_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    project = await db.scalar(select(Project).where(Project.id == project_id, Project.owner_id == user.id))
+    if not project:
+        raise HTTPException(404, "Project not found")
+    files = list((await db.scalars(
+        select(ProjectFile).where(ProjectFile.project_id == project_id).order_by(ProjectFile.path)
+    )).all())
+    return files
+
+@app.get('/api/projects/{project_id}/files/content', response_model=FileContentOut)
+async def get_file_content(
+    project_id: str,
+    path: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    project = await db.scalar(select(Project).where(Project.id == project_id, Project.owner_id == user.id))
+    if not project:
+        raise HTTPException(404, "Project not found")
+    record = await db.scalar(
+        select(ProjectFile)
+        .where(ProjectFile.project_id == project_id, ProjectFile.path == path)
+        .order_by(ProjectFile.created_at.desc())
+    )
+    if not record:
+        raise HTTPException(404, "File not found")
+    return FileContentOut(
+        path=record.path,
+        content=record.content,
+        size_bytes=record.size_bytes,
+        is_binary=record.is_binary
+    )
+
+@app.get('/api/projects/{project_id}/workspace')
+async def get_project_workspace(
+    project_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    project = await db.scalar(select(Project).where(Project.id == project_id, Project.owner_id == user.id))
+    if not project:
+        raise HTTPException(404, "Project not found")
+    latest_run = await db.scalar(
+        select(MigrationRun).where(MigrationRun.project_id == project_id).order_by(MigrationRun.created_at.desc())
+    )
+    files = list((await db.scalars(
+        select(ProjectFile).where(ProjectFile.project_id == project_id).order_by(ProjectFile.path)
+    )).all())
+    return {
+        "project": {
+            "id": project.id,
+            "name": project.name,
+            "repository_url": project.repository_url,
+        },
+        "latest_run": {
+            "id": latest_run.id if latest_run else None,
+            "state": latest_run.state.value if latest_run else None,
+            "status_message": latest_run.status_message if latest_run else None,
+            "node_analysis": latest_run.node_analysis if latest_run else None,
+            "default_branch": latest_run.default_branch if latest_run else "main",
+        } if latest_run else None,
+        "files_count": len(files),
+        "files": [
+            {"id": f.id, "path": f.path, "size_bytes": f.size_bytes, "is_binary": f.is_binary}
+            for f in files
+        ]
+    }
+
 @app.post('/projects', response_model=ProjectOut)
 async def create_project(data: ProjectCreate, user: User=Depends(current_user), db: AsyncSession=Depends(get_db)):
     project=Project(**data.model_dump(),owner_id=user.id); db.add(project); await db.commit(); await db.refresh(project); return project
@@ -475,6 +618,8 @@ async def run_events(run_id: str, user: User = Depends(current_user), db: AsyncS
                 payload = {
                     "run_id": run_id,
                     "state": current.state.value if current else "FAILED",
+                    "status_message": current.status_message if current else None,
+                    "node_analysis": current.node_analysis if current else None,
                     "stages": [{"name": s.stage_name.value, "status": s.status.value, "evidence_reference": s.evidence_reference} for s in stages],
                 }
             if payload != last_payload:
