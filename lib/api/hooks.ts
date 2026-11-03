@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, getToken, setToken } from './client'
+import { useAuth } from '@clerk/nextjs'
+import { api, getActiveToken, getToken, setToken } from './client'
 
 export const queryKeys = {
   projects: ['projects'] as const,
@@ -13,10 +14,18 @@ export const queryKeys = {
   report: (id: string) => ['runs', id, 'report'] as const,
 }
 
+export function useIsAuth() {
+  const { isSignedIn, isLoaded } = useAuth()
+  const local = getToken()
+  if (!isLoaded) return Boolean(local)
+  return Boolean(isSignedIn || local)
+}
+
 export function useProjects() {
+  const isAuth = useIsAuth()
   return useQuery({
     queryKey: queryKeys.projects,
-    enabled: Boolean(getToken()),
+    enabled: isAuth,
     queryFn: async () => {
       const { data, error } = await api.GET('/projects')
       if (error) throw new Error('Unable to load projects')
@@ -26,9 +35,10 @@ export function useProjects() {
 }
 
 export function useRun(id: string) {
+  const isAuth = useIsAuth()
   return useQuery({
     queryKey: queryKeys.run(id),
-    enabled: Boolean(id && getToken()),
+    enabled: Boolean(id && isAuth),
     queryFn: async () => {
       const { data, error } = await api.GET('/runs/{run_id}', { params: { path: { run_id: id } } })
       if (error) throw new Error('Unable to load run')
@@ -38,9 +48,10 @@ export function useRun(id: string) {
 }
 
 export function useRunDetails(id: string) {
+  const isAuth = useIsAuth()
   return useQuery({
     queryKey: queryKeys.details(id),
-    enabled: Boolean(id && getToken()),
+    enabled: Boolean(id && isAuth),
     queryFn: async () => {
       const { data, error } = await api.GET('/runs/{run_id}/details', { params: { path: { run_id: id } } })
       if (error) throw new Error('Unable to load run details')
@@ -50,9 +61,10 @@ export function useRunDetails(id: string) {
 }
 
 export function useFindings(id: string) {
+  const isAuth = useIsAuth()
   return useQuery({
     queryKey: queryKeys.findings(id),
-    enabled: Boolean(id && getToken()),
+    enabled: Boolean(id && isAuth),
     queryFn: async () => {
       const { data, error } = await api.GET('/runs/{run_id}/findings', { params: { path: { run_id: id } } })
       if (error) throw new Error('Unable to load findings')
@@ -62,9 +74,10 @@ export function useFindings(id: string) {
 }
 
 export function useChanges(id: string) {
+  const isAuth = useIsAuth()
   return useQuery({
     queryKey: queryKeys.changes(id),
-    enabled: Boolean(id && getToken()),
+    enabled: Boolean(id && isAuth),
     queryFn: async () => {
       const { data, error } = await api.GET('/runs/{run_id}/changes', { params: { path: { run_id: id } } })
       if (error) throw new Error('Unable to load migration changes')
@@ -74,9 +87,10 @@ export function useChanges(id: string) {
 }
 
 export function useReport(id: string) {
+  const isAuth = useIsAuth()
   return useQuery({
     queryKey: queryKeys.report(id),
-    enabled: Boolean(id && getToken()),
+    enabled: Boolean(id && isAuth),
     queryFn: async () => {
       const { data, error } = await api.GET('/runs/{run_id}/report', { params: { path: { run_id: id } } })
       if (error) throw new Error('Unable to load report')
@@ -137,12 +151,14 @@ export function useRunEvents(runId: string) {
   const [event, setEvent] = useState<Record<string, unknown> | null>(null)
   const [connected, setConnected] = useState(false)
   const retry = useRef(0)
+  const isAuth = useIsAuth()
+
   useEffect(() => {
-    if (!runId || !getToken()) return
+    if (!runId || !isAuth) return
     let source: EventSource | null = null
     let timer: number | undefined
-    const connect = () => {
-      const token = getToken()
+    const connect = async () => {
+      const token = await getActiveToken()
       if (!token) return
       source = new EventSource(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/runs/${runId}/events?token=${encodeURIComponent(token)}`)
       source.onopen = () => { setConnected(true); retry.current = 0 }
@@ -155,7 +171,7 @@ export function useRunEvents(runId: string) {
     }
     connect()
     return () => { source?.close(); if (timer) window.clearTimeout(timer) }
-  }, [runId])
+  }, [runId, isAuth])
   return { event, connected }
 }
 

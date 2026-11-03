@@ -53,7 +53,7 @@ class AzureJobService:
             poller = client.jobs.begin_start(
                 resource_group_name=self.resource_group,
                 job_name=self.job_name,
-                job_execution_template=template,
+                template=template,
             )
             execution = poller.result()
             execution_id = getattr(execution, "name", None) or getattr(execution, "id", None) or "started"

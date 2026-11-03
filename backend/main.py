@@ -266,7 +266,7 @@ async def create_project(data: ProjectCreate, user: User=Depends(current_user), 
     project=Project(**data.model_dump(),owner_id=user.id); db.add(project); await db.commit(); await db.refresh(project); return project
 @app.get('/projects', response_model=list[ProjectOut])
 async def list_projects(user: User=Depends(current_user), db: AsyncSession=Depends(get_db)):
-    return list((await db.scalars(select(Project).where(Project.owner_id==user.id))).all())
+    return list((await db.scalars(select(Project).where(Project.owner_id==user.id).order_by(Project.created_at.desc()))).all())
 @app.post('/projects/{project_id}/runs', response_model=RunOut, status_code=202)
 async def create_run(project_id: str, user: User=Depends(current_user), db: AsyncSession=Depends(get_db)):
     project=await db.scalar(select(Project).where(Project.id==project_id,Project.owner_id==user.id))
