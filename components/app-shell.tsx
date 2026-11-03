@@ -39,7 +39,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <ShieldCheck className="size-5" />
             </span>
             <span className="font-semibold text-white">
-              Migration<span className="text-cyan-300">Guard</span>
+              Codexa<span className="text-cyan-300"> AI</span>
             </span>
           </Link>
 

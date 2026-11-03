@@ -11,7 +11,7 @@ from html import escape
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .db import SessionLocal, get_db
@@ -39,7 +39,7 @@ from .llm.providers import FakeProvider
 
 _llm_requests: dict[str, list[float]] = {}
 
-app=FastAPI(title='MigrationGuard API', version='1.0.0')
+app=FastAPI(title='Codexa AI API', version='1.0.0')
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -355,7 +355,7 @@ async def get_report_html(run_id: str, user: User = Depends(current_user), db: A
     report = await build_evidence_report(db, run, await _run_verdict(db, run_id))
     reasons = "".join(f"<li>{escape(item['rule_id'])}: {escape(item['message'])}</li>" for item in report["verdict"]["reasons"])
     limitations = "".join(f"<li>{escape(item)}</li>" for item in report["limitations"])
-    return HTMLResponse(f"<html><body><h1>MigrationGuard verification report</h1><h2>{escape(report['verdict']['value'])}</h2><p>{escape(report['verdict']['caveat'])}</p><h2>Reasons</h2><ul>{reasons}</ul><h2>Limitations</h2><ul>{limitations}</ul></body></html>")
+    return HTMLResponse(f"<html><body><h1>Codexa AI verification report</h1><h2>{escape(report['verdict']['value'])}</h2><p>{escape(report['verdict']['caveat'])}</p><h2>Reasons</h2><ul>{reasons}</ul><h2>Limitations</h2><ul>{limitations}</ul></body></html>")
 
 @app.get('/runs/{run_id}/report.pdf')
 async def get_report_pdf(run_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
@@ -411,7 +411,7 @@ async def open_pull_request(run_id: str, data: dict, user: User = Depends(requir
     owner, repo = parts[0], parts[1].removesuffix(".git")
     report = await build_evidence_report(db, run, await _run_verdict(db, run_id))
     payload = json.dumps({
-        "title": data.get("title", f"MigrationGuard Java 17 migration for {project.name}"),
+        "title": data.get("title", f"Codexa AI Java 17 migration for {project.name}"),
         "head": data.get("head", f"migrationguard/{run_id}"),
         "base": data.get("base", "main"),
         "body": render_markdown(report),

@@ -6,7 +6,7 @@ import './globals.css'
 import { Providers } from './providers'
 
 export const metadata: Metadata = {
-  title: 'MigrationGuard — Don’t just migrate. Verify.',
+  title: 'Codexa AI — Don’t just migrate. Verify.',
   description: 'Independent evidence for safer Java migrations.',
   generator: 'v0.app',
   icons: { icon: '/icon.svg', apple: '/apple-icon.png' },
