@@ -23,6 +23,8 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" className="dark">
       <body className="antialiased">
         <ClerkProvider
+          signInFallbackRedirectUrl="/dashboard"
+          signUpFallbackRedirectUrl="/dashboard"
           appearance={{
             theme: [dark, shadcn],
             variables: {
