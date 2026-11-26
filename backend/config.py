@@ -11,10 +11,15 @@ class Settings(BaseSettings):
     app_env: str = "development"
     migrationguard_enable_execution: bool = False
     maven_mirror: str | None = None
+    docker_executable: str | None = None
+    maven_image_template: str = 'maven:3.9-eclipse-temurin-{java_version}'
+    maven_repository_path: str = '/tmp/m2'
+    maven_offline: bool = False
     workspace_root: str = "./migrationguard-workspaces"
     openrewrite_plugin_version: str = "6.17.0"
     openrewrite_recipe_version: str = "3.17.0"
     openrewrite_recipes: str = "org.openrewrite.java.migrate.UpgradeToJava17"
+    openrewrite_enabled: bool = False
     migration_dry_run: bool = False
     llm_provider: str | None = None
     llm_model: str = "default"

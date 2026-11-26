@@ -115,6 +115,8 @@ async def execute_stage(db, run: MigrationRun, stage: RunStage, zip_path: str | 
             maven_mirror=settings.maven_mirror,
         )
         if baseline.status == "SKIPPED" or migrated_result.status == "SKIPPED":
+            for variant, result in (("baseline", baseline), ("migrated", migrated_result)):
+                db.add(BuildRun(run_id=run.id, variant=variant, status=result.status, exit_code=result.exit_code, logs=result.logs, artifacts=result.artifacts))
             stage.status = StageStatus.SKIPPED
             stage.error = "Docker build execution is disabled."
         else:
@@ -171,6 +173,10 @@ async def execute_stage(db, run: MigrationRun, stage: RunStage, zip_path: str | 
         await db.flush()
         stage.evidence_reference = f"report:{report.id}"
     elif stage.stage_name == StageName.VERDICT:
+        # This stage and its evidence are committed only after policy/report generation succeeds.
+        stage.status = StageStatus.PASSED
+        stage.evidence_reference = f'verdict:{run.id}'
+        await db.flush()
         stages = list((await db.scalars(select(RunStage).where(RunStage.run_id == run.id))).all())
         findings = list((await db.scalars(select(AnalysisFinding).where(AnalysisFinding.run_id == run.id))).all())
         builds = list((await db.scalars(select(BuildRun).where(BuildRun.run_id == run.id))).all())
@@ -232,7 +238,8 @@ async def advance_run(run_id: str, zip_path: str | None = None) -> None:
                 run.verdict = 'INCONCLUSIVE'
                 run.status_message = stage.error or f'{name.value} did not complete verification.'
                 await db.commit()
-                return
+                if name not in {StageName.BUILD_AND_TEST, StageName.TEST_INTEGRITY}:
+                    return
             await db.commit()
         stages = list((await db.scalars(select(RunStage).where(RunStage.run_id == run.id))).all())
         run.state = RunState.AWAITING_APPROVAL if can_enter_approval(stages) and run.verdict not in {"UNSAFE", "INCONCLUSIVE"} else RunState.INCONCLUSIVE

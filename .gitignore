@@ -20,5 +20,6 @@ __pycache__/
 *.pyc
 *.db
 results/
+migrationguard-workspaces/
 .DS_Store
 .neon

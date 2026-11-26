@@ -25,3 +25,30 @@ jobs:
         env:
           # Public, nonfunctional key for build-only CI. Deployment supplies its own Clerk instance.
           NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || 'pk_test_ZXhhbXBsZS5jbGVyay5hY2NvdW50cy5kZXYk' }}
+
+  java-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      APP_ENV: test
+      DATABASE_URL: sqlite+aiosqlite:///./acceptance.db
+      AZURE_ENABLED: 'false'
+      MIGRATIONGUARD_TEST_JAVA_PIPELINE: '1'
+      SENTRY_DSN: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -r backend/requirements.txt
+      - name: Prepare trusted Java 8 dependencies
+        run: docker build --build-arg JAVA_VERSION=8 -t migrationguard-fixture-java8:local tests/fixtures/java8-orders
+      - name: Prepare trusted Java 17 dependencies
+        run: docker build --build-arg JAVA_VERSION=17 -t migrationguard-fixture-java17:local tests/fixtures/java8-orders
+      - name: Verify migration and negative controls offline
+        run: python -m pytest -q -s tests/test_java_pipeline.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: java-migration-evidence
+          path: results/java-acceptance/
+          retention-days: 7

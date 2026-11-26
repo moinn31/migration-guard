@@ -442,8 +442,13 @@ async def create_zip_run(project_id: str, upload: UploadFile = File(...), user: 
         db.add_all([RunStage(run_id=run.id, stage_name=name, status=StageStatus.PENDING) for name in StageName])
         await db.commit()
         await db.refresh(run)
-        from workers.celery_app import run_pipeline
-        run_pipeline.apply_async(args=[run.id, temporary.name])
+        try:
+            enqueue_run(run.id, temporary.name)
+        except Exception as exc:
+            Path(temporary.name).unlink(missing_ok=True)
+            run.state = RunState.FAILED
+            await db.commit()
+            raise HTTPException(503, 'Unable to enqueue uploaded repository') from exc
         return run
     finally:
         await upload.close()
