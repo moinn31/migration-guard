@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from git import Repo
+from .git_client import clone_shallow
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -140,6 +140,7 @@ async def clone_and_persist_repository(
         run = await db.get(MigrationRun, run_id)
         if run:
             run.state = RunState.CLONING
+            run.error_message = None
             run.status_message = "Connecting to GitHub & cloning repository..."
             await db.commit()
 
@@ -150,7 +151,7 @@ async def clone_and_persist_repository(
             clone_url = f"https://x-access-token:{quote(github_token, safe='')}@{clean_url}"
 
         logger.info(f"Cloning {repository_url} into {temp_dir}")
-        await asyncio.to_thread(Repo.clone_from, clone_url, target_path, branch=branch, depth=1, kill_after_timeout=120)
+        await asyncio.to_thread(clone_shallow, clone_url, target_path, branch=branch, timeout=120)
 
         # Update status to ANALYZING
         async with SessionLocal() as db:
@@ -217,6 +218,7 @@ async def clone_and_persist_repository(
             run = await db.get(MigrationRun, run_id)
             if run:
                 run.state = RunState.COMPLETED
+                run.error_message = None
                 run.status_message = f"Successfully imported {len(files_to_store)} files to Neon database"
                 run.node_analysis = node_analysis
             await db.commit()
