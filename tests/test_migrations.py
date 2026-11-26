@@ -11,6 +11,7 @@ EXPECTED_TABLES = {
     "analysis_findings", "test_cases", "test_results", "build_runs",
     "risk_assessments", "reports", "approvals", "test_integrity_results",
     "audit_log", "run_stages", "llm_interactions", "report_shares",
+    "project_files",
 }
 
 
@@ -26,8 +27,15 @@ def run_upgrade(url: str) -> set[str]:
 
 
 def test_alembic_upgrade_fresh_sqlite(tmp_path):
-    tables = run_upgrade(f"sqlite:///{tmp_path / 'migrationguard.db'}")
+    url = f"sqlite:///{tmp_path / 'migrationguard.db'}"
+    tables = run_upgrade(url)
     assert EXPECTED_TABLES <= tables
+    engine = create_engine(url)
+    try:
+        columns = {item['name'] for item in inspect(engine).get_columns('migration_runs')}
+        assert {'repository_id', 'azure_execution_id', 'status_message', 'node_analysis'} <= columns
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.integration

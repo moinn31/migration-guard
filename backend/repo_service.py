@@ -1,4 +1,5 @@
 import json
+import asyncio
 import logging
 import os
 import shutil
@@ -11,6 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import SessionLocal
 from .models import MigrationRun, Project, ProjectFile, RunState
+from .ingestion import validate_github_url, MAX_FILES, MAX_BYTES
+from .observability import redact
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -140,14 +144,13 @@ async def clone_and_persist_repository(
             await db.commit()
 
     try:
-        # Prepare clone URL with token if available
-        clone_url = repository_url
-        if github_token and "github.com" in clone_url:
+        clone_url = await asyncio.to_thread(validate_github_url, repository_url)
+        if github_token:
             clean_url = clone_url.replace("https://", "").replace("http://", "")
-            clone_url = f"https://x-access-token:{github_token}@{clean_url}"
+            clone_url = f"https://x-access-token:{quote(github_token, safe='')}@{clean_url}"
 
         logger.info(f"Cloning {repository_url} into {temp_dir}")
-        repo = Repo.clone_from(clone_url, target_path, branch=branch, depth=1)
+        await asyncio.to_thread(Repo.clone_from, clone_url, target_path, branch=branch, depth=1, kill_after_timeout=120)
 
         # Update status to ANALYZING
         async with SessionLocal() as db:
@@ -162,16 +165,22 @@ async def clone_and_persist_repository(
 
         # Traverse and collect files
         files_to_store: List[ProjectFile] = []
+        total_bytes = 0
         for root, dirs, files in os.walk(target_path):
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             for file_name in files:
                 file_full = Path(root) / file_name
+                if file_full.is_symlink() or not file_full.resolve().is_relative_to(target_path.resolve()):
+                    continue
                 rel_path = file_full.relative_to(target_path).as_posix()
 
                 try:
                     file_size = file_full.stat().st_size
                 except OSError:
                     file_size = 0
+                total_bytes += file_size
+                if len(files_to_store) >= MAX_FILES or total_bytes > MAX_BYTES:
+                    raise ValueError('Repository exceeds import size limits')
 
                 content: Optional[str] = None
                 is_binary = True
@@ -216,15 +225,16 @@ async def clone_and_persist_repository(
         return node_analysis
 
     except Exception as e:
-        logger.error(f"Error cloning repository: {e}")
+        message = redact(str(e).replace(github_token, '[REDACTED]') if github_token else str(e))
+        logger.error("Error cloning repository: %s", message)
         async with SessionLocal() as db:
             run = await db.get(MigrationRun, run_id)
             if run:
                 run.state = RunState.FAILED
-                run.status_message = f"Cloning failed: {str(e)}"
-                run.error_message = str(e)
+                run.status_message = f"Cloning failed: {message}"[:500]
+                run.error_message = message
                 await db.commit()
-        raise e
+        raise RuntimeError('Repository import failed; inspect the redacted run error') from None
 
     finally:
         # Cleanup temporary clone files from host memory/disk

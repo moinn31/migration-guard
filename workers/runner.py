@@ -229,6 +229,8 @@ async def advance_run(run_id: str, zip_path: str | None = None) -> None:
                         return
             if stage.status in {StageStatus.FAILED, StageStatus.SKIPPED}:
                 run.state = RunState.INCONCLUSIVE
+                run.verdict = 'INCONCLUSIVE'
+                run.status_message = stage.error or f'{name.value} did not complete verification.'
                 await db.commit()
                 return
             await db.commit()

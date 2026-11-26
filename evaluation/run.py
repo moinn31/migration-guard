@@ -5,7 +5,6 @@ import csv
 import json
 from pathlib import Path
 import random
-import time
 
 from .metrics import summarize_rows
 
@@ -44,20 +43,24 @@ def main() -> None:
     if args.inspect_dataset:
         inspect_dataset(DATASET)
         return
-    config = {"seed": 20261027, "subset_size": 10, "outputs": "results/"}
-    subset, full = load_subset(DATASET, config["subset_size"], config["seed"])
-    output = Path(config["outputs"])
+    import yaml
+    from concurrent.futures import ThreadPoolExecutor
+    from .evidence import report_row
+    config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8")) or {}
+    reports = config.get("reports", [])
+    if not reports:
+        parser.error("Configure reports: [path/to/exported-report.json]. Dataset system adapters are not implemented; no fabricated metrics will be written.")
+    output = Path(config.get("outputs", "results/"))
     output.mkdir(parents=True, exist_ok=True)
-    rows = []
-    systems = ["plain_build_test", "openrewrite", "llm_only", "migrationguard"]
-    for index, item in enumerate(subset):
-        for system in systems:
-            started = time.perf_counter()
-            rows.append({"repo": str(item.get("repo_id", index)), "system": system, "build_success": False, "tests_preserved": False, "regression_detected": False, "false_positive": False, "unnecessary_change": False, "runtime_seconds": time.perf_counter() - started})
+    def evaluate(path):
+        report = json.loads(Path(path).read_text(encoding="utf-8"))
+        return report_row(report.get("content", report))
+    with ThreadPoolExecutor(max_workers=args.max_workers or config.get("max_workers", 2)) as pool:
+        rows = list(pool.map(evaluate, reports))
     with (output / "metrics.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=rows[0].keys() if rows else ["repo", "system"])
         writer.writeheader(); writer.writerows(rows)
-    (output / "summary.md").write_text(f"# MigrationGuard evaluation\n\nDataset: `{DATASET}`\n\nRepositories sampled: {len(subset)} of {len(full)}.\n\n## Metrics\n\n```json\n{json.dumps(summarize_rows(rows), indent=2)}\n```\n\n## Limitations\n\nSample size, dataset selection bias, uncontrolled build environments, and best-effort checks limit generalization. Risk remains heuristic, not a probability.\n", encoding="utf-8")
+    (output / "summary.md").write_text(f"# MigrationGuard evaluation\n\nDataset: `{DATASET}`\n\nPersisted reports evaluated: {len(rows)}. No dataset comparison was executed.\n\n## Metrics\n\n```json\n{json.dumps(summarize_rows(rows), indent=2)}\n```\n\n## Limitations\n\nSample size, dataset selection bias, uncontrolled build environments, and best-effort checks limit generalization. Risk remains heuristic, not a probability.\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

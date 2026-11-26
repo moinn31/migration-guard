@@ -3,6 +3,11 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      APP_ENV: test
+      DATABASE_URL: sqlite+aiosqlite:///./ci.db
+      AZURE_ENABLED: 'false'
+      WORKSPACE_EXECUTION_ENABLED: 'false'
     defaults: {run: {working-directory: .}}
     steps:
       - uses: actions/checkout@v4
@@ -17,3 +22,6 @@ jobs:
       - run: npm run generate:api
       - run: git diff --exit-code -- lib/api/generated/schema.d.ts
       - run: npm run build
+        env:
+          # Public, nonfunctional key for build-only CI. Deployment supplies its own Clerk instance.
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || 'pk_test_ZXhhbXBsZS5jbGVyay5hY2NvdW50cy5kZXYk' }}

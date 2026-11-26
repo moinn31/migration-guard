@@ -1,4 +1,6 @@
 import logging
+import ipaddress
+from urllib.parse import urlparse
 from typing import Optional
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.appcontainers import ContainerAppsAPIClient
@@ -32,6 +34,16 @@ class AzureJobService:
         if not settings.azure_enabled:
             logger.info("Azure integration disabled by configuration.")
             return None
+
+        parsed = urlparse(backend_url)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.hostname.lower() == 'localhost':
+            raise ValueError('Azure requires BACKEND_PUBLIC_URL with a public HTTPS address')
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            address = None
+        if address and not address.is_global:
+            raise ValueError('Azure callback cannot use a local or private IP address')
 
         try:
             client = self.get_client()

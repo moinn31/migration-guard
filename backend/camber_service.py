@@ -35,7 +35,8 @@ async def call_tool(name: str, arguments: dict):
     try:
         async with asyncio.timeout(180):
             async with create_mcp_http_client(headers={"Authorization": f"Bearer {token}"}) as client:
-                async with streamable_http_client(MCP_URL, http_client=client) as (read, write):
+                async with streamable_http_client(MCP_URL, http_client=client) as streams:
+                    read, write = streams[:2]
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         result = await session.call_tool(name, arguments)

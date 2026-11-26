@@ -25,10 +25,27 @@ class Settings(BaseSettings):
     
     # Clerk Authentication
     clerk_secret_key: str | None = None
+    clerk_issuer: str | None = None
+    next_public_clerk_publishable_key: str | None = None
+    clerk_audience: str | None = None
+    clerk_authorized_parties: list[str] = []
+    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"]
+    terminal_timeout_seconds: int = 300
+    agent_max_retries: int = 3
+    camber_api_key: str | None = None
+    camber_mcp_access_token: str | None = None
+    camber_fixer_agent: str | None = None
+    camber_chat_agent: str | None = None
+    sentry_dsn: str | None = None
+    sentry_environment: str = "development"
+    workspace_execution_enabled: bool = False
+    backend_public_url: str | None = None
+    # Each project gets its own isolated Azure workspace URL and bearer token.
+    azure_workspaces: dict[str, dict[str, str]] = {}
 
     # Azure Container Apps Jobs
-    azure_enabled: bool = True
-    azure_subscription_id: str = "dea7d5c6-4a09-488a-9d67-e9445fe6586f"
+    azure_enabled: bool = False
+    azure_subscription_id: str = ""
     azure_resource_group: str = "rg-migration-platform"
     azure_containerapps_environment: str = "env-migration-standard"
     azure_containerapps_job_name: str = "migration-worker"
@@ -38,6 +55,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secret(self):
+        if self.terminal_timeout_seconds <= 0 or not 1 <= self.agent_max_retries <= 5:
+            raise ValueError('Terminal timeout must be positive and agent retries must be between 1 and 5')
+        urls = [item.get('url', '').rstrip('/') for item in self.azure_workspaces.values()]
+        if len(urls) != len(set(urls)):
+            raise ValueError('Each project must have a separate Azure workspace URL')
         if self.app_env.lower() in {"production", "prod"} and (
             len(self.jwt_secret.encode("utf-8")) < 32
             or self.jwt_secret.startswith(("change-me", "local-development", "replace-"))

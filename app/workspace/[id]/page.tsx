@@ -94,10 +94,46 @@ export default function WorkspacePage() {
 
   // Chat/Follow-up prompt state
   const [promptInput, setPromptInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const [commandInput, setCommandInput] = useState('')
+  const [terminalError, setTerminalError] = useState('')
+  const [jobs, setJobs] = useState<Array<{ id: string; command: string; status: string; output: string; process_running: boolean; notices: Array<{ id: string; text: string }> }>>([])
+  async function workspaceRequest(path: string, options: RequestInit = {}) {
+    const token = await getActiveToken()
+    const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}${path}`, {
+      ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers },
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Workspace request failed')
+    return data
+  }
+  useEffect(() => {
+    let active = true
+    const refresh = async () => {
+      try { const data = await workspaceRequest('/terminal/jobs'); if (active) setJobs(data) }
+      catch (error) { if (active) setTerminalError(error instanceof Error ? error.message : 'Unable to load terminal jobs') }
+    }
+    refresh()
+    const timer = setInterval(refresh, 2000)
+    return () => { active = false; clearInterval(timer) }
+  }, [projectId])
+  async function startCommand() {
+    if (!commandInput.trim()) return
+    setTerminalError('')
+    try {
+      await workspaceRequest('/terminal/jobs', { method: 'POST', body: JSON.stringify({ command: commandInput, terminal_id: `terminal-${Date.now()}` }) })
+      setCommandInput('')
+      setJobs(await workspaceRequest('/terminal/jobs'))
+    } catch (error) { setTerminalError(error instanceof Error ? error.message : 'Unable to start command') }
+  }
+  async function stopCommand(jobId: string) {
+    try { await workspaceRequest(`/terminal/jobs/${jobId}`, { method: 'DELETE' }); setJobs(await workspaceRequest('/terminal/jobs')) }
+    catch (error) { setTerminalError(error instanceof Error ? error.message : 'Unable to stop command') }
+  }
   const [chatMessages, setChatMessages] = useState<Array<{ role: 'assistant' | 'user'; text: string; time?: string }>>([
     {
       role: 'assistant',
-      text: 'Repository cloned into isolated environment. All project source files have been stored into Neon PostgreSQL. Ready for migration analysis and code modernization.',
+      text: 'Workspace assistant. Ask about the imported project or use the terminal below to run a command on the configured worker.',
       time: 'Just now',
     },
   ])
@@ -201,19 +237,21 @@ export default function WorkspacePage() {
   }
 
   // Send message
-  function handleSendPrompt() {
-    if (!promptInput.trim()) return
+  async function handleSendPrompt() {
+    if (!promptInput.trim() || sending) return
     const userText = promptInput.trim()
     setPromptInput('')
     setChatMessages((prev) => [
       ...prev,
       { role: 'user', text: userText, time: 'Just now' },
-      {
-        role: 'assistant',
-        text: `Analysis recorded: "${userText}". Agent communication will connect here in the next step to execute interactive code migrations.`,
-        time: 'Just now',
-      },
     ])
+    setSending(true)
+    try {
+      const data = await workspaceRequest('/chat', { method: 'POST', body: JSON.stringify({ message: userText }) })
+      setChatMessages(prev => [...prev, { role: 'assistant', text: data.reply, time: 'Just now' }])
+    } catch (error) {
+      setChatMessages(prev => [...prev, { role: 'assistant', text: error instanceof Error ? error.message : 'Assistant unavailable', time: 'Just now' }])
+    } finally { setSending(false) }
   }
 
   // Build hierarchical folder tree from flat file list
@@ -535,7 +573,7 @@ export default function WorkspacePage() {
               />
               <button
                 onClick={handleSendPrompt}
-                disabled={!promptInput.trim()}
+                disabled={!promptInput.trim() || sending}
                 className="absolute right-2.5 bottom-3.5 text-cyan-400 hover:text-cyan-200 disabled:opacity-40 transition-colors"
               >
                 <Send className="size-3.5" />
@@ -544,7 +582,7 @@ export default function WorkspacePage() {
             <div className="flex items-center justify-between mt-2 text-[10px] text-slate-500">
               <span className="flex items-center gap-1">
                 <Sparkles className="size-3 text-cyan-400" />
-                AI Migration Assistant ready
+                {sending ? 'Assistant responding…' : 'AI Migration Assistant'}
               </span>
               <span>Enter to send</span>
             </div>
@@ -646,6 +684,19 @@ export default function WorkspacePage() {
               </div>
             )}
           </div>
+          <section className="max-h-72 overflow-auto border-t border-white/10 p-4" aria-label="Workspace terminal">
+            <h2 className="mb-2 text-sm font-semibold text-white">Workspace terminal</h2>
+            <form className="flex gap-2" onSubmit={event => { event.preventDefault(); startCommand() }}>
+              <input aria-label="Terminal command" value={commandInput} onChange={event => setCommandInput(event.target.value)} placeholder="Command to run in this project" className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 p-2 text-xs text-white" />
+              <button className="rounded bg-cyan-300 px-3 text-xs text-black" disabled={!commandInput.trim()}>Run</button>
+            </form>
+            {terminalError && <p role="alert" className="mt-2 text-xs text-red-300">{terminalError}</p>}
+            {jobs.map(job => <div key={job.id} className="mt-3 rounded border border-white/10 p-2 text-xs text-slate-300">
+              <p>{job.command} — {job.status} {['queued', 'running', 'recovering'].includes(job.status) && <button onClick={() => stopCommand(job.id)} className="ml-2 text-red-300">Stop</button>}</p>
+              <pre className="mt-2 whitespace-pre-wrap">{job.output}</pre>
+              {job.notices.map(notice => <p key={notice.id} className="mt-1 text-amber-200">{notice.text}</p>)}
+            </div>)}
+          </section>
         </main>
       </div>
     </div>
