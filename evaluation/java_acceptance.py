@@ -44,7 +44,7 @@ def main():
         report = json.loads((output / f'{scenario}.json').read_text(encoding='utf-8'))
         lines.append(f"| {scenario} | {report['verdict']['value']} | {len(report['tests']['baseline'])} | {len(report['tests']['migrated'])} |")
     lines.extend(['', 'All original snapshots were verified unchanged. Unsafe/inconclusive approvals were rejected.',
-                  'Clean and weakened cases require written human review. Coverage is unavailable; no behavioral-equivalence claim is made.',
+                  'Coverage is measured from JaCoCo XML. The weakened case requires written human review; passing checks do not prove behavioral equivalence.',
                   'This is a controlled acceptance fixture, not a public-repository benchmark or a live cloud deployment.'])
     (output / 'summary.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
     print(f'\nEvidence: {output / "summary.md"}')

@@ -17,7 +17,7 @@ export const queryKeys = {
 export function useIsAuth() {
   const { isSignedIn, isLoaded } = useAuth()
   const local = getToken()
-  if (!isLoaded) return Boolean(local)
+  if (!isLoaded) return false
   return Boolean(isSignedIn || local)
 }
 
@@ -38,6 +38,7 @@ export function useRun(id: string) {
   const isAuth = useIsAuth()
   return useQuery({
     queryKey: queryKeys.run(id),
+    refetchInterval: query => ['ACCEPTED', 'REJECTED', 'AWAITING_APPROVAL', 'INCONCLUSIVE', 'FAILED', 'COMPLETED'].includes(query.state.data?.state ?? '') ? false : 3000,
     enabled: Boolean(id && isAuth),
     queryFn: async () => {
       const { data, error } = await api.GET('/runs/{run_id}', { params: { path: { run_id: id } } })
@@ -88,8 +89,10 @@ export function useChanges(id: string) {
 
 export function useReport(id: string) {
   const isAuth = useIsAuth()
+  const run = useRun(id)
   return useQuery({
     queryKey: queryKeys.report(id),
+    refetchInterval: ['ACCEPTED', 'REJECTED', 'AWAITING_APPROVAL', 'INCONCLUSIVE', 'FAILED', 'COMPLETED'].includes(run.data?.state ?? '') ? false : 3000,
     enabled: Boolean(id && isAuth),
     queryFn: async () => {
       const { data, error } = await api.GET('/runs/{run_id}/report', { params: { path: { run_id: id } } })

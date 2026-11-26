@@ -4,6 +4,7 @@
   "private": true,
   "packageManager": "pnpm@12.3.4",
   "scripts": {
+    "test:client": "node --experimental-strip-types --test tests/client/*.test.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

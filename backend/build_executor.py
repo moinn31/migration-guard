@@ -9,7 +9,8 @@ import uuid
 import os
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
-from .config import settings
+from .config import settings, VerificationProfile
+from .coverage import collect_coverage
 from .sandbox import docker_executable
 
 
@@ -83,6 +84,7 @@ async def run_maven_build(
     docker_enabled: bool = False,
     maven_mirror: str | None = None,
     test_filter: str | None = None,
+    profile: VerificationProfile | None = None,
 ) -> BuildResult:
     if not docker_enabled:
         return BuildResult("SKIPPED", 0, "Sandbox execution is disabled by default.", {})
@@ -106,7 +108,10 @@ async def run_maven_build(
     except RuntimeError as exc:
         shutil.rmtree(temporary)
         return BuildResult('ERROR', 127, str(exc), {})
-    image = settings.maven_image_template.format(java_version=java_version)
+    image = (profile.image_template if profile else settings.maven_image_template).format(java_version=java_version)
+    repository_path = profile.repository_path if profile else settings.maven_repository_path
+    offline = profile.offline if profile else settings.maven_offline
+    measure_coverage = profile.collect_coverage if profile else settings.maven_collect_coverage
     uid = os.getuid() if hasattr(os, 'getuid') and os.getuid() != 0 else 1000
     gid = os.getgid() if hasattr(os, 'getgid') and os.getuid() != 0 else 1000
     command = [
@@ -129,8 +134,9 @@ async def run_maven_build(
         settings_file = temporary / 'settings.xml'
         ET.ElementTree(document).write(settings_file, encoding='utf-8', xml_declaration=True)
         command.extend(['-v', f'{settings_file}:/maven-settings.xml:ro'])
-    command.extend(['-w', '/workspace', image, 'mvn', '-B', f'-Dmaven.repo.local={settings.maven_repository_path}', 'test'])
-    if settings.maven_offline:
+    goals = ['org.jacoco:jacoco-maven-plugin:0.8.12:prepare-agent', 'test', 'org.jacoco:jacoco-maven-plugin:0.8.12:report'] if measure_coverage else ['test']
+    command.extend(['-w', '/workspace', image, 'mvn', '-B', f'-Dmaven.repo.local={repository_path}', *goals])
+    if offline:
         command.append('--offline')
     if maven_mirror:
         command.extend(['--settings', '/maven-settings.xml'])
@@ -164,6 +170,7 @@ async def run_maven_build(
             pass
     tests = []
     versions = {}
+    expected_classes = {}
     try:
         for report_dir in sorted(working.rglob('surefire-reports')):
             if not report_dir.resolve().is_relative_to(working) or report_dir.parent.name != 'target':
@@ -178,13 +185,16 @@ async def run_maven_build(
                     shutil.copyfile(report, destination / report.name)
         for classes in working.rglob('classes'):
             if classes.parent.name == 'target' and classes.resolve().is_relative_to(working):
-                for path, version in class_major_versions(classes).items():
+                collected = class_major_versions(classes)
+                expected_classes[classes.parent.parent.relative_to(working).as_posix()] = {path[:-6] for path in collected}
+                for path, version in collected.items():
                     versions[(classes.relative_to(working) / path).as_posix()] = version
         logs = output.decode(errors='replace')
         (artifact_root / 'build.log').write_text(logs, encoding='utf-8')
         artifacts = {'directory': str(artifact_root), 'surefire_reports': str(artifact_root),
                      'class_major_versions': versions, 'test_count': len(tests),
                      'java_version': java_version, 'image': image, 'command': command,
+                     'execution_enabled': True, 'coverage': collect_coverage(working, artifact_root, expected_classes),
                      'network': 'bridge' if maven_mirror else 'none'}
         return BuildResult(status, code, logs, artifacts, tuple(tests))
     finally:
@@ -213,6 +223,7 @@ async def rerun_failed_tests(
     docker_enabled: bool,
     maven_mirror: str | None = None,
     retries: int = 2,
+    profile: VerificationProfile | None = None,
 ) -> set[str]:
     flaky: set[str] = set()
     for test in tests:
@@ -226,6 +237,7 @@ async def rerun_failed_tests(
                 docker_enabled=docker_enabled,
                 maven_mirror=maven_mirror,
                 test_filter=f"{class_name}#{method}",
+                profile=profile,
             )
             if any(item.name == test.name and item.status == "pass" for item in rerun.tests):
                 flaky.add(test.name)

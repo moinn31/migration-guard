@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 import ast
+from .coverage import coverage_changes
 
 
 VERIFIED_CAVEAT = "Passing checks do not prove behavioral equivalence."
@@ -52,8 +53,9 @@ def compute_verdict(
     results = list(test_results)
     integrity = list(test_integrity_results)
     changes = list(migration_changes)
+    coverage_by_variant = {_value(getattr(build, 'variant', 'migrated')): getattr(build, 'artifacts', {}).get('coverage') for build in builds}
     if coverage_available is None:
-        coverage_available = any(bool(getattr(build, 'artifacts', {}).get('coverage')) for build in builds)
+        coverage_available = all(bool(coverage_by_variant.get(variant, {}) and coverage_by_variant[variant].get('measured')) for variant in ('baseline', 'migrated'))
     reasons: list[VerdictReason] = []
 
     def add(rule: str, severity: str, ref: str, message: str) -> None:
@@ -137,6 +139,11 @@ def compute_verdict(
         add("UNRESOLVED_DEPENDENCY_CONFLICT", "medium", "dependencies", "Dependency conflicts remain unresolved.")
     if not coverage_available:
         add("COVERAGE_UNAVAILABLE", "low", "coverage", "Coverage evidence is unavailable.")
+    if coverage_available:
+        for issue in coverage_changes(coverage_by_variant.get('baseline'), coverage_by_variant.get('migrated')):
+            add('COVERAGE_DECREASED', 'medium', f"coverage:{issue['module']}:{issue['metric']}", issue['message'])
+        if any(coverage.get('missing_modules') or any(module.get('missing_classes') for module in coverage.get('modules', {}).values()) for coverage in coverage_by_variant.values() if coverage):
+            add('COVERAGE_SCOPE_INCOMPLETE', 'medium', 'coverage', 'Some compiled classes or modules are outside the measured coverage scope.')
 
     if any(reason.severity == "critical" or reason.rule_id in {
         "REQUIRED_STAGE_FAILED", "MIGRATED_BUILD_FAILED", "BASELINE_PASS_MIGRATED_FAIL",

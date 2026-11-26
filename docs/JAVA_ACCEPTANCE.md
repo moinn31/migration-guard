@@ -18,7 +18,7 @@ Every run creates fresh evidence under `results/java-acceptance/<run>/`: summary
 
 | Scenario | Expected result | Evidence |
 | --- | --- | --- |
-| Clean Java 8 to 17 migration | NEEDS_REVIEW | Both tests pass, bytecode 52 becomes 61; missing coverage is disclosed; approval requires justification |
+| Clean Java 8 to 17 migration | VERIFIED_BY_CHECKS | Both tests pass, bytecode 52 becomes 61, measured coverage does not decrease; ordinary human approval remains explicit |
 | Equality replaced by nullness assertion | NEEDS_REVIEW | Builds still pass, but test-integrity evidence flags ASSERTION_WEAKENED |
 | Deleted test method | UNSAFE | Missing method and lower test count; ordinary approval denied |
 | Incorrect production calculation | UNSAFE | A baseline passing test fails after migration; ordinary approval denied |
@@ -26,7 +26,7 @@ Every run creates fresh evidence under `results/java-acceptance/<run>/`: summary
 
 Negative variants are injected only by this test harness into disposable migration copies. Normal migration rules never perform those test modifications. Every scenario verifies the original snapshot hash is unchanged. Reports must already be persisted by the worker before the test requests the report API.
 
-The clean case intentionally does not claim VERIFIED_BY_CHECKS while coverage is unavailable. An administrator override remains a separate audited product capability; these acceptance cases test ordinary developer approval.
+The clean case requires actual JaCoCo execution and XML evidence for both variants. Missing coverage remains NEEDS_REVIEW; decreased coverage or incomplete measured scope requires review. An administrator override remains a separate audited product capability; these acceptance cases test ordinary developer approval.
 
 ## Pipeline changes
 
@@ -43,4 +43,4 @@ The CI `java-acceptance` job prepares images, runs the five scenarios and upload
 
 ## Limitations and next step
 
-The fixture has two JUnit tests and a simple compiler-target migration. It is not a MigrationBench evaluation, full AST-semantic analysis, coverage measurement, or proof of equivalence. Production worker recovery, artifact retention/access policies, and broader repository/build combinations need further validation. Next, measure coverage and run the same acceptance process on a small pinned public-repository subset.
+The fixture has two JUnit tests and a simple compiler-target migration. It is not a MigrationBench evaluation, full AST-semantic analysis or proof of equivalence. Production worker recovery, artifact retention/access policies, and broader repository/build combinations need further validation. Next, expand the pinned public-repository subset and validate worker recovery and artifact access policies.

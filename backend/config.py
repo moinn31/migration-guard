@@ -1,6 +1,13 @@
-from pydantic import model_validator
+from pydantic import BaseModel, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
+class VerificationProfile(BaseModel):
+    enabled: bool = False
+    image_template: str
+    repository_path: str = '/opt/maven-repository'
+    offline: bool = True
+    collect_coverage: bool = True
 
 class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./migrationguard.db"
@@ -15,6 +22,8 @@ class Settings(BaseSettings):
     maven_image_template: str = 'maven:3.9-eclipse-temurin-{java_version}'
     maven_repository_path: str = '/tmp/m2'
     maven_offline: bool = False
+    maven_collect_coverage: bool = False
+    project_verification_profiles: dict[str, VerificationProfile] = {}
     workspace_root: str = "./migrationguard-workspaces"
     openrewrite_plugin_version: str = "6.17.0"
     openrewrite_recipe_version: str = "3.17.0"
@@ -47,6 +56,7 @@ class Settings(BaseSettings):
     backend_public_url: str | None = None
     # Each project gets its own isolated Azure workspace URL and bearer token.
     azure_workspaces: dict[str, dict[str, str]] = {}
+    project_previews: dict[str, str] = {}
 
     # Azure Container Apps Jobs
     azure_enabled: bool = False
@@ -74,3 +84,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+def verification_profile(project_id: str) -> VerificationProfile | None:
+    profile = settings.project_verification_profiles.get(project_id)
+    return profile if profile and profile.enabled else None
+
+def execution_enabled(project_id: str) -> bool:
+    return settings.migrationguard_enable_execution or verification_profile(project_id) is not None

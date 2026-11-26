@@ -17,6 +17,9 @@ async def test_workspace_commands_require_explicit_execution_and_ownership(appro
 @pytest.mark.asyncio
 async def test_workspace_chat_returns_actual_agent_response(approval_client, monkeypatch):
     from backend import camber_service
+    from backend.config import settings
+    monkeypatch.setattr(settings, 'camber_chat_agent', 'test-agent')
+    monkeypatch.setattr(settings, 'camber_mcp_access_token', 'test-token')
     async def ask(tag, message):
         assert 'Explain this project' in message
         return 'Response from the configured agent'
@@ -26,6 +29,23 @@ async def test_workspace_chat_returns_actual_agent_response(approval_client, mon
     response = await client.post(f'/api/projects/{project_id}/chat', json={'message': 'Explain this project'})
     assert response.status_code == 200
     assert response.json()['reply'] == 'Response from the configured agent'
+
+@pytest.mark.asyncio
+async def test_local_assistant_and_workspace_capabilities(approval_client, monkeypatch):
+    from backend.config import settings
+    monkeypatch.setattr(settings, 'camber_chat_agent', None)
+    monkeypatch.setattr(settings, 'workspace_execution_enabled', False)
+    client, _, _, _ = approval_client
+    project_id = (await client.get('/projects')).json()[0]['id']
+    monkeypatch.setattr(settings, 'project_previews', {project_id: 'http://127.0.0.1:8080'})
+    workspace = (await client.get(f'/api/projects/{project_id}/workspace')).json()
+    assert workspace['preview_url'] == 'http://127.0.0.1:8080'
+    assert workspace['terminal_enabled'] is False
+    response = await client.post(f'/api/projects/{project_id}/chat', json={'message': 'Summarize verification coverage'})
+    assert response.status_code == 200
+    assert response.json()['mode'] == 'local_analysis'
+    assert 'No verification report' in response.json()['reply']
+    assert (await client.get('/api/projects/other/workspace')).status_code == 404
 
 @pytest.mark.asyncio
 async def test_benchmarks_do_not_invent_measurements(approval_client):

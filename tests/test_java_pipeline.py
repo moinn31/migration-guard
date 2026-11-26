@@ -27,7 +27,7 @@ FIXTURE = Path(__file__).parent / 'fixtures/java8-orders'
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('scenario,expected', [
-    ('clean', 'NEEDS_REVIEW'), ('weakened_assertion', 'NEEDS_REVIEW'),
+    ('clean', 'VERIFIED_BY_CHECKS'), ('weakened_assertion', 'NEEDS_REVIEW'),
     ('deleted_test', 'UNSAFE'), ('regression', 'UNSAFE'), ('execution_disabled', 'INCONCLUSIVE'),
 ])
 async def test_java_migration_acceptance(tmp_path, monkeypatch, scenario, expected):
@@ -37,6 +37,7 @@ async def test_java_migration_acceptance(tmp_path, monkeypatch, scenario, expect
     monkeypatch.setattr(settings, 'maven_image_template', 'migrationguard-fixture-java{java_version}:local')
     monkeypatch.setattr(settings, 'maven_repository_path', '/opt/maven-repository')
     monkeypatch.setattr(settings, 'maven_offline', True)
+    monkeypatch.setattr(settings, 'maven_collect_coverage', True)
     monkeypatch.setattr(settings, 'maven_mirror', None)
     monkeypatch.setattr(settings, 'openrewrite_enabled', False)
     monkeypatch.setattr(settings, 'migrationguard_enable_execution', scenario != 'execution_disabled')
@@ -108,10 +109,9 @@ async def test_java_migration_acceptance(tmp_path, monkeypatch, scenario, expect
             if scenario == 'deleted_test':
                 assert any(item['code'] == 'TESTS_DELETED' for item in report['integrity_findings'])
             approval = await client.post(f'/runs/{run_id}/approval', json={'decision': 'approved'})
-            assert approval.status_code == (422 if expected == 'NEEDS_REVIEW' else 409), approval.text
+            assert approval.status_code == (200 if expected == 'VERIFIED_BY_CHECKS' else 422 if expected == 'NEEDS_REVIEW' else 409), approval.text
             if scenario == 'clean':
-                approved = await client.post(f'/runs/{run_id}/approval', json={'decision': 'approved', 'justification': 'Reviewed passing build/test evidence and missing coverage limitation.'})
-                assert approved.status_code == 200, approved.text
+                assert report['coverage']['baseline']['measured'] and report['coverage']['migrated']['measured']
                 assert (await client.get(f'/runs/{run_id}')).json()['state'] == 'ACCEPTED'
             (output / f'{scenario}.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
             print(f'\n{scenario}: {expected}; original snapshot preserved; approval guard enforced')
