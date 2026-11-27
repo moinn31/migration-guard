@@ -42,11 +42,21 @@ interface WorkspaceTerminalProps {
   projectId: string
   terminalEnabled: boolean
   workspaceRequest: (path: string, options?: RequestInit) => Promise<any>
+  onErrorCaptured?: (errorInfo: { id: string; command: string; output: string; exit_code?: number | null; sentry_event_id?: string }) => void
 }
 
 function formatCwd(rawCwd?: string): string {
   if (!rawCwd) return '~/repo'
   const normalized = rawCwd.replace(/\\/g, '/')
+  const projectsIndex = normalized.indexOf('/workspace/projects/')
+  if (projectsIndex !== -1) {
+    const afterProjects = normalized.substring(projectsIndex + '/workspace/projects/'.length)
+    const firstSlash = afterProjects.indexOf('/')
+    if (firstSlash === -1) {
+      return '~/repo'
+    }
+    return `~/repo${afterProjects.substring(firstSlash)}`
+  }
   const repoIndex = normalized.indexOf('/workspace/repository')
   if (repoIndex !== -1) {
     const sub = normalized.substring(repoIndex + '/workspace/repository'.length)
@@ -59,6 +69,7 @@ export function WorkspaceTerminal({
   projectId,
   terminalEnabled,
   workspaceRequest,
+  onErrorCaptured,
 }: WorkspaceTerminalProps) {
   // Tabs State
   const [tabs, setTabs] = useState<TerminalTab[]>([
@@ -125,6 +136,18 @@ export function WorkspaceTerminal({
     setShowScrollBottomBtn(!isNearBottom)
   }
 
+  // Reset tabs, jobs, and state whenever projectId changes
+  useEffect(() => {
+    setTabs([{ id: 'term-1', title: 'Terminal 1', type: 'user' }])
+    setActiveTabId('term-1')
+    setJobs([])
+    setClearedJobIdsByTab({})
+    setCommandHistory([])
+    setHistoryIndex(-1)
+    setRunningJobId(null)
+    setErrorMsg('')
+  }, [projectId])
+
   // Adaptive polling: fast (250ms) while running, idle (2500ms) otherwise
   useEffect(() => {
     if (!terminalEnabled) return
@@ -144,17 +167,45 @@ export function WorkspaceTerminal({
           return [...data, ...remainingOptimistic]
         })
 
-        // Detect AI jobs and auto-create tab (e.g. "Terminal (AI-1)")
+        // Detect AI jobs and auto-create tab (e.g. "AI Terminal", "AI Terminal 2")
         data.forEach((job) => {
           const tid = job.terminal_id || 'term-1'
-          if (tid.startsWith('ai-') || tid.includes('ai')) {
+          if (tid === 'ai-terminal' || tid.startsWith('ai-') || tid.includes('ai')) {
             setTabs((prev) => {
               if (prev.some((t) => t.id === tid)) return prev
-              const aiNum = tid.replace(/[^0-9]/g, '') || '1'
+              const title =
+                tid === 'ai-terminal'
+                  ? 'AI Terminal'
+                  : `AI Terminal ${tid.replace('ai-terminal-', '').replace(/[^0-9]/g, '') || '2'}`
               return [
                 ...prev,
-                { id: tid, title: `Terminal (AI-${aiNum})`, type: 'ai' },
+                { id: tid, title, type: 'ai' },
               ]
+            })
+
+            // Copilot-style auto-switch to active AI terminal when AI job starts
+            if (job.status === 'running') {
+              setActiveTabId((current) => {
+                if (current.startsWith('term-')) {
+                  return tid
+                }
+                return current
+              })
+            }
+          }
+
+          // Check if job failed and report to Left Communication Panel
+          const isError =
+            job.status === 'failed' ||
+            (job.exit_code != null && job.exit_code !== 0) ||
+            Boolean((job as any).sentry_event_id)
+          if (isError && onErrorCaptured) {
+            onErrorCaptured({
+              id: job.id,
+              command: job.command,
+              output: job.output,
+              exit_code: job.exit_code,
+              sentry_event_id: (job as any).sentry_event_id,
             })
           }
         })
@@ -205,8 +256,8 @@ export function WorkspaceTerminal({
     setTimeout(() => inputRef.current?.focus(), 50)
   }
 
-  // Close tab
-  const handleCloseTab = (idToClose: string, e: React.MouseEvent) => {
+  // Close tab: also permanently purge its commands from database/Azure
+  const handleCloseTab = async (idToClose: string, e: React.MouseEvent) => {
     e.stopPropagation()
     if (tabs.length <= 1) return
     const nextTabs = tabs.filter((t) => t.id !== idToClose)
@@ -214,10 +265,18 @@ export function WorkspaceTerminal({
     if (activeTabId === idToClose) {
       setActiveTabId(nextTabs[nextTabs.length - 1].id)
     }
+    try {
+      await workspaceRequest(`/terminal/clear?terminal_id=${encodeURIComponent(idToClose)}`, {
+        method: 'DELETE',
+      })
+    } catch (err) {
+      console.warn('Failed to clear terminal on server:', err)
+    }
+    setJobs((prev) => prev.filter((j) => j.terminal_id !== idToClose))
   }
 
-  // Clear active terminal: guarantees old logs NEVER reappear on background poll
-  const handleClear = () => {
+  // Clear active terminal: guarantees old logs NEVER reappear on background poll and purges on server
+  const handleClear = async () => {
     const idsToClear = jobs
       .filter(
         (j) =>
@@ -234,6 +293,14 @@ export function WorkspaceTerminal({
     setJobs((prev) => prev.filter((j) => !idsToClear.includes(j.id)))
     setShowScrollBottomBtn(false)
     isAutoScrollActiveRef.current = true
+
+    try {
+      await workspaceRequest(`/terminal/clear?terminal_id=${encodeURIComponent(activeTabId)}`, {
+        method: 'DELETE',
+      })
+    } catch (err) {
+      console.warn('Failed to clear terminal on server:', err)
+    }
   }
 
   // Execute command
@@ -292,6 +359,19 @@ export function WorkspaceTerminal({
         setRunningJobId(returnedJob.id)
       } else {
         setRunningJobId(null)
+        const isError =
+          returnedJob.status === 'failed' ||
+          (returnedJob.exit_code != null && returnedJob.exit_code !== 0) ||
+          Boolean((returnedJob as any).sentry_event_id)
+        if (isError && onErrorCaptured) {
+          onErrorCaptured({
+            id: returnedJob.id,
+            command: returnedJob.command,
+            output: returnedJob.output,
+            exit_code: returnedJob.exit_code,
+            sentry_event_id: (returnedJob as any).sentry_event_id,
+          })
+        }
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Command execution failed')
@@ -598,31 +678,40 @@ export function WorkspaceTerminal({
               <span className="text-slate-300 font-bold">$</span>
             </div>
 
-            {/* Input Line */}
-            <input
-              ref={inputRef}
-              type="text"
-              value={commandInput}
-              onChange={(e) => setCommandInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                terminalEnabled
-                  ? `Run command in ${currentTab.title} (e.g. ls, cd UniversityManagementSystem-GUI, cls)...`
-                  : 'Terminal disabled'
-              }
-              disabled={!terminalEnabled}
-              className="min-w-0 flex-1 bg-transparent text-xs text-white placeholder-slate-600 focus:outline-none font-mono"
-            />
+            {/* Input Line: Disabled for AI-managed tab, interactive for user tabs */}
+            {currentTab.type === 'ai' ? (
+              <div className="flex-1 flex items-center gap-2 py-1 text-xs text-purple-300 font-mono italic select-none">
+                <span className="inline-block size-2 rounded-full bg-purple-400 animate-pulse shrink-0" />
+                <span>AI Terminal is system-managed (automated agent execution only · non-interactive)</span>
+              </div>
+            ) : (
+              <input
+                ref={inputRef}
+                type="text"
+                value={commandInput}
+                onChange={(e) => setCommandInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={
+                  terminalEnabled
+                    ? `Run command in ${currentTab.title} (e.g. ls, cd UniversityManagementSystem-GUI, cls)...`
+                    : 'Terminal disabled'
+                }
+                disabled={!terminalEnabled}
+                className="min-w-0 flex-1 bg-transparent text-xs text-white placeholder-slate-600 focus:outline-none font-mono"
+              />
+            )}
 
             {/* Submit Run Button */}
-            <button
-              type="submit"
-              disabled={!commandInput.trim() || !terminalEnabled}
-              className="flex items-center gap-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 px-2.5 py-1 text-[11px] font-mono transition-colors disabled:opacity-40"
-            >
-              <Play className="size-2.5 fill-current" />
-              <span>Run</span>
-            </button>
+            {currentTab.type !== 'ai' && (
+              <button
+                type="submit"
+                disabled={!commandInput.trim() || !terminalEnabled}
+                className="flex items-center gap-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 px-2.5 py-1 text-[11px] font-mono transition-colors disabled:opacity-40"
+              >
+                <Play className="size-2.5 fill-current" />
+                <span>Run</span>
+              </button>
+            )}
           </form>
         </div>
       )}

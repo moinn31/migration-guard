@@ -84,6 +84,16 @@ interface WorkspaceData {
   agent_mode?: 'camber' | 'local_analysis'
 }
 
+interface ChatMessage {
+  role: 'assistant' | 'user' | 'error' | 'warning'
+  text: string
+  time?: string
+  command?: string
+  output?: string
+  sentryEventId?: string
+  exitCode?: number | null
+}
+
 export default function WorkspacePage() {
   const { id: projectId } = useParams<{ id: string }>()
   const router = useRouter()
@@ -155,13 +165,128 @@ export default function WorkspacePage() {
     try { await workspaceRequest(`/terminal/jobs/${jobId}`, { method: 'DELETE' }); setJobs(await workspaceRequest('/terminal/jobs')) }
     catch (error) { setTerminalError(error instanceof Error ? error.message : 'Unable to stop command') }
   }
-  const [chatMessages, setChatMessages] = useState<Array<{ role: 'assistant' | 'user'; text: string; time?: string }>>([
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',
       text: 'Workspace assistant. Ask about the imported project or use the terminal below to run a command on the configured worker.',
       time: 'Just now',
     },
   ])
+  const alertedJobIdsRef = React.useRef<Set<string>>(new Set())
+
+  // Reset chat and error tracking when project changes
+  useEffect(() => {
+    setChatMessages([
+      {
+        role: 'assistant',
+        text: 'Workspace assistant. Ask about the imported project or use the terminal below to run a command on the configured worker.',
+        time: 'Just now',
+      },
+    ])
+    alertedJobIdsRef.current = new Set()
+    setJobs([])
+  }, [projectId])
+
+  const handleErrorCaptured = (err: { id: string; command: string; output: string; exit_code?: number | null; sentry_event_id?: string }) => {
+    if (alertedJobIdsRef.current.has(err.id)) return
+    alertedJobIdsRef.current.add(err.id)
+
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        role: 'error',
+        text: err.output || `Command '${err.command}' failed`,
+        command: err.command,
+        output: err.output,
+        sentryEventId: err.sentry_event_id,
+        exitCode: err.exit_code,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+    ])
+  }
+
+  async function handleAskCamberFix(err: ChatMessage) {
+    const promptText = `Diagnose and fix command error: \`${err.command}\`\nOutput:\n${err.output || err.text}\n${err.sentryEventId ? `Sentry Event ID: ${err.sentryEventId}` : ''}`
+    setChatMessages((prev) => [
+      ...prev,
+      { role: 'user', text: `Diagnose error in: \`${err.command}\``, time: 'Just now' },
+    ])
+    setSending(true)
+    try {
+      const data = await workspaceRequest('/chat', { method: 'POST', body: JSON.stringify({ message: promptText }) })
+      setChatMessages(prev => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: data.reply,
+          time: 'Just now',
+        }
+      ])
+    } catch (error) {
+      setChatMessages(prev => [
+        ...prev,
+        { role: 'assistant', text: error instanceof Error ? error.message : 'Assistant unavailable', time: 'Just now' }
+      ])
+    } finally { setSending(false) }
+  }
+
+  const [runningPipeline, setRunningPipeline] = useState(false)
+
+  async function triggerMultiagentPipeline() {
+    setRunningPipeline(true)
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        role: 'user',
+        text: '🚀 Starting Multi-Agent System (Agent 1: Codebase Analyzer, Agent 2: Dependency Installer, Agent 3: Project Runner)...',
+        time: 'Just now',
+      },
+    ])
+    try {
+      const res = await workspaceRequest('/multiagent/pipeline', { method: 'POST' })
+      if (res.report) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: res.report,
+            time: 'Just now',
+          },
+        ])
+      }
+      if (res.install_jobs && res.install_jobs.length > 0) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: '🤖 **[Agent 2: Dependency Installer]**\nDependency setup commands dispatched to the non-interactive **AI Terminal** tab. Live installation running inside Azure Container sandbox.',
+            time: 'Just now',
+          },
+        ])
+      }
+      if (res.run_job) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: '🎉 **[Agent 3: Project Runner]**\nApplication launch command executed! Switch to the **Preview** tab at the top to interact with the running project.',
+            time: 'Just now',
+          },
+        ])
+      }
+    } catch (err) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: `Multi-agent pipeline error: ${err instanceof Error ? err.message : 'Unknown error'}`,
+          time: 'Just now',
+        },
+      ])
+    } finally {
+      setRunningPipeline(false)
+    }
+  }
 
   // 1. Load Workspace & Files from Backend (Neon DB)
   async function loadWorkspace() {
@@ -556,27 +681,97 @@ export default function WorkspacePage() {
                 Agent History
               </span>
               <div className="space-y-2 text-xs">
-                {chatMessages.map((msg, i) => (
-                  <div
-                    key={i}
-                    className={`rounded-lg p-2.5 ${
-                      msg.role === 'assistant'
-                        ? 'bg-white/[0.03] border border-white/[0.06] text-slate-300'
-                        : 'bg-cyan-500/10 border border-cyan-500/20 text-cyan-100 ml-3'
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
-                    {msg.time && (
-                      <span className="text-[10px] text-slate-500 block mt-1 text-right">{msg.time}</span>
-                    )}
-                  </div>
-                ))}
+                {chatMessages.map((msg, i) => {
+                  if (msg.role === 'error' || msg.role === 'warning') {
+                    return (
+                      <div
+                        key={i}
+                        className="rounded-xl border border-red-500/30 bg-red-950/20 p-3 space-y-2 text-xs"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="flex items-center gap-1.5 font-semibold text-red-400">
+                            <AlertTriangle className="size-3.5 text-red-400 shrink-0" />
+                            Command Error
+                          </span>
+                          {msg.sentryEventId ? (
+                            <a
+                              href="https://sentry.io"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-cyan-300 font-mono bg-cyan-950/80 px-1.5 py-0.5 rounded border border-cyan-800 hover:underline flex items-center gap-1"
+                              title="Inspect issue in Sentry"
+                            >
+                              <span>Sentry #{msg.sentryEventId.slice(0, 8)}</span>
+                              <span>↗</span>
+                            </a>
+                          ) : (
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              exit: {msg.exitCode ?? 1}
+                            </span>
+                          )}
+                        </div>
+
+                        {msg.command && (
+                          <div className="rounded bg-black/50 px-2 py-1 font-mono text-[11px] text-slate-300 border border-white/5 truncate">
+                            <span className="text-emerald-400">$ </span>
+                            {msg.command}
+                          </div>
+                        )}
+
+                        <p className="whitespace-pre-wrap font-mono text-[11px] text-red-300/90 leading-relaxed max-h-24 overflow-y-auto bg-black/30 p-2 rounded border border-red-500/10">
+                          {msg.output || msg.text}
+                        </p>
+
+                        <button
+                          onClick={() => handleAskCamberFix(msg)}
+                          disabled={sending}
+                          className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/40 py-1.5 text-xs text-purple-200 font-medium transition-colors disabled:opacity-40"
+                        >
+                          <Sparkles className="size-3.5 text-purple-300" />
+                          <span>Analyze & Fix with Camber Agent</span>
+                        </button>
+
+                        {msg.time && (
+                          <span className="text-[10px] text-slate-500 block text-right">
+                            {msg.time}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  }
+
+                  return (
+                    <div
+                      key={i}
+                      className={`rounded-lg p-2.5 ${
+                        msg.role === 'assistant'
+                          ? 'bg-white/[0.03] border border-white/[0.06] text-slate-300'
+                          : 'bg-cyan-500/10 border border-cyan-500/20 text-cyan-100 ml-3'
+                      }`}
+                    >
+                      <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+                      {msg.time && (
+                        <span className="text-[10px] text-slate-500 block mt-1 text-right">{msg.time}</span>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           </div>
 
           {/* Chat / Prompt Input Form */}
           <div className="p-3 border-t border-white/[0.08] bg-[#090d14]">
+            {/* 3-Agent Automation Launch Button */}
+            <button
+              onClick={triggerMultiagentPipeline}
+              disabled={runningPipeline}
+              className="w-full mb-2.5 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500/20 to-purple-500/20 hover:from-cyan-500/30 hover:to-purple-500/30 border border-cyan-500/40 py-2 px-3 text-xs text-cyan-200 font-semibold shadow-lg transition-all disabled:opacity-40"
+            >
+              <Sparkles className={`size-3.5 text-cyan-300 ${runningPipeline ? 'animate-spin' : ''}`} />
+              <span>{runningPipeline ? 'Agents Working on Project…' : '🤖 Launch Multi-Agent System (3 Agents)'}</span>
+            </button>
+
             <p className="mb-2 text-[10px] text-slate-400">{workspace?.agent_mode === 'camber' ? 'Connected AI assistant · suggestions require review' : 'Local project analysis · no external AI required'}</p>
             <div className="mb-3 flex flex-wrap gap-1.5">{['Explain this project', 'Plan the Java 8 to Java 17 migration', 'Summarize verification results and coverage'].map(prompt => <button key={prompt} onClick={() => setPromptInput(prompt)} className="rounded border border-white/10 px-2 py-1 text-left text-[10px] text-cyan-200">{prompt}</button>)}</div>
             <div className="relative">
@@ -721,6 +916,7 @@ export default function WorkspacePage() {
             projectId={projectId}
             terminalEnabled={Boolean(workspace?.terminal_enabled)}
             workspaceRequest={workspaceRequest}
+            onErrorCaptured={handleErrorCaptured}
           />
         </main>
       </div>

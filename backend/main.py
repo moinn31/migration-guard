@@ -368,8 +368,38 @@ async def remote_workspace(project_id: str, method: str, path: str, body: dict |
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, 'Azure workspace is unavailable') from exc
 
-def remote_job(job: dict):
-    return {**job, 'notices': [{'id': job['id'] + ':remote', 'text': 'Executed in the configured Azure workspace. Remote automatic recovery is not enabled.'}], 'process_running': job.get('status') == 'running'}
+def remote_job(job: dict, project_id: str | None = None):
+    notices = [{'id': job['id'] + ':remote', 'text': 'Executed in the configured Azure workspace.'}]
+    
+    is_failed = job.get('status') == 'failed' or (job.get('exit_code') is not None and job.get('exit_code') != 0)
+    sentry_event_id = job.get('sentry_event_id')
+    
+    if is_failed and not sentry_event_id and project_id:
+        try:
+            event_id = observability.record_failure(
+                project_id=project_id,
+                job_id=job['id'],
+                command=job.get('command', ''),
+                output=job.get('output', '')
+            )
+            if event_id:
+                sentry_event_id = event_id
+                job['sentry_event_id'] = event_id
+        except Exception:
+            pass
+
+    if sentry_event_id:
+        notices.append({
+            'id': job['id'] + ':sentry',
+            'text': f"Error captured in Sentry (Issue ID: {sentry_event_id}). Recorded for log analysis."
+        })
+
+    return {
+        **job,
+        'sentry_event_id': sentry_event_id,
+        'notices': notices,
+        'process_running': job.get('status') == 'running'
+    }
 
 @app.post('/api/projects/{project_id}/chat')
 async def workspace_chat(project_id: str, data: WorkspaceMessage, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
@@ -386,6 +416,89 @@ async def workspace_chat(project_id: str, data: WorkspaceMessage, user: User = D
         raise HTTPException(503, str(exc)) from exc
     return {'reply': reply, 'mode': 'camber'}
 
+@app.post('/api/projects/{project_id}/multiagent/pipeline')
+async def trigger_multiagent_pipeline(project_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    project = await owned_project(project_id, user, db)
+    files = list((await db.scalars(select(ProjectFile).where(ProjectFile.project_id == project_id))).all())
+    file_dicts = [{'path': f.path, 'content': f.content, 'size_bytes': f.size_bytes} for f in files]
+    
+    from .multiagent_runner import analyze_codebase_stack, format_agent1_analysis_message
+    analysis = analyze_codebase_stack(file_dicts)
+    report_text = format_agent1_analysis_message(analysis)
+    
+    # Determine Copilot-style AI terminal ID (e.g. ai-terminal, or ai-terminal-2 if busy)
+    target_ai_terminal = 'ai-terminal'
+    if get_azure_workspace(project_id):
+        try:
+            state = await remote_workspace(project_id, 'GET', f'/status?project_id={project_id}')
+            if not state.get('initialized') and project.repository_url:
+                await remote_workspace(project_id, 'POST', '/import', {
+                    'repository_url': project.repository_url,
+                    'github_token': settings.github_token,
+                    'project_id': project_id,
+                })
+            
+            existing_jobs = await remote_workspace(project_id, 'GET', f'/commands?project_id={project_id}')
+            running_ai_ids = {
+                j.get('terminal_id')
+                for j in existing_jobs
+                if j.get('status') == 'running' and str(j.get('terminal_id', '')).startswith('ai-terminal')
+            }
+            if 'ai-terminal' in running_ai_ids:
+                idx = 2
+                while f'ai-terminal-{idx}' in running_ai_ids:
+                    idx += 1
+                target_ai_terminal = f'ai-terminal-{idx}'
+        except Exception:
+            pass
+
+    # Agent 2: Install dependencies in non-interactive AI terminal
+    install_jobs = []
+    install_success = True
+    if get_azure_workspace(project_id) and analysis.get('install_commands'):
+        for cmd in analysis['install_commands']:
+            job = await remote_workspace(project_id, 'POST', '/commands', {
+                'command': cmd,
+                'terminal_id': target_ai_terminal,
+                'cwd': '.',
+                'project_id': project_id,
+            })
+            install_jobs.append(job)
+
+            # Wait for install job to finish before proceeding to run
+            job_id = job.get('id')
+            if job_id and job.get('status') == 'running':
+                for _ in range(120):  # poll up to 60s
+                    await asyncio.sleep(0.5)
+                    try:
+                        cmds = await remote_workspace(project_id, 'GET', f'/commands?project_id={project_id}')
+                        current = next((c for c in cmds if c.get('id') == job_id), None)
+                        if current and current.get('status') in {'succeeded', 'failed', 'cancelled'}:
+                            if current.get('status') != 'succeeded':
+                                install_success = False
+                            break
+                    except Exception:
+                        pass
+
+    # Agent 3: Launch application in AI terminal and set preview ONLY if install succeeded
+    run_job = None
+    if install_success and get_azure_workspace(project_id) and analysis.get('run_command'):
+        run_job = await remote_workspace(project_id, 'POST', '/commands', {
+            'command': analysis['run_command'],
+            'terminal_id': target_ai_terminal,
+            'cwd': '.',
+            'project_id': project_id,
+        })
+        settings.project_previews[project_id] = 'https://ca-workspace.jollywater-d76a80b2.centralindia.azurecontainerapps.io'
+
+    return {
+        'analysis': analysis,
+        'report': report_text,
+        'terminal_id': target_ai_terminal,
+        'install_jobs': install_jobs,
+        'run_job': run_job
+    }
+
 _initialized_azure_workspaces: set[str] = set()
 
 @app.post('/api/projects/{project_id}/terminal/jobs', status_code=202)
@@ -398,20 +511,29 @@ async def start_terminal_job(project_id: str, data: TerminalCommand, user: User 
     if get_azure_workspace(project_id):
         # Fast path: only check status and run import if we haven't initialized this session
         if project_id not in _initialized_azure_workspaces:
-            state = await remote_workspace(project_id, 'GET', '/status')
+            state = await remote_workspace(project_id, 'GET', f'/status?project_id={project_id}')
             if not state.get('initialized'):
                 if not project.repository_url:
                     raise HTTPException(409, 'Remote workspace requires a repository URL')
-                await remote_workspace(project_id, 'POST', '/import', {'repository_url': project.repository_url, 'github_token': settings.github_token})
+                await remote_workspace(project_id, 'POST', '/import', {
+                    'repository_url': project.repository_url,
+                    'github_token': settings.github_token,
+                    'project_id': project_id,
+                })
             _initialized_azure_workspaces.add(project_id)
 
-        job = await remote_workspace(project_id, 'POST', '/commands', {'command': data.command, 'terminal_id': data.terminal_id, 'cwd': data.cwd})
+        job = await remote_workspace(project_id, 'POST', '/commands', {
+            'command': data.command,
+            'terminal_id': data.terminal_id,
+            'cwd': data.cwd,
+            'project_id': project_id,
+        })
 
         # Instant completion: wait a brief slice (250ms) for quick commands (ls, pwd, cd, etc.) to complete
         if job.get('status') == 'running':
             await asyncio.sleep(0.25)
             try:
-                commands = await remote_workspace(project_id, 'GET', '/commands')
+                commands = await remote_workspace(project_id, 'GET', f'/commands?project_id={project_id}')
                 for c in commands:
                     if c.get('id') == job.get('id'):
                         job = c
@@ -419,7 +541,7 @@ async def start_terminal_job(project_id: str, data: TerminalCommand, user: User 
             except Exception:
                 pass
 
-        return remote_job(job)
+        return remote_job(job, project_id=project_id)
     root = await hydrate_project_files_if_needed(project_id, db)
     context = await analyze_project_context(project_id, db)
     try:
@@ -432,19 +554,41 @@ async def list_terminal_jobs(project_id: str, user: User = Depends(current_user)
     await owned_project(project_id, user, db)
     if get_azure_workspace(project_id):
         _initialized_azure_workspaces.add(project_id)
-        return [remote_job(job) for job in await remote_workspace(project_id, 'GET', '/commands')]
+        return [remote_job(job, project_id=project_id) for job in await remote_workspace(project_id, 'GET', f'/commands?project_id={project_id}')]
     return [job.public() for job in terminal_manager.jobs.values() if job.project_id == project_id]
 
 @app.delete('/api/projects/{project_id}/terminal/jobs/{job_id}')
 async def cancel_terminal_job(project_id: str, job_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await owned_project(project_id, user, db)
     if get_azure_workspace(project_id):
-        return remote_job(await remote_workspace(project_id, 'DELETE', '/commands/' + urllib.parse.quote(job_id, safe='')))
+        return remote_job(await remote_workspace(project_id, 'DELETE', '/commands/' + urllib.parse.quote(job_id, safe='')), project_id=project_id)
     job = terminal_manager.jobs.get(job_id)
     if not job or job.project_id != project_id:
         raise HTTPException(404, 'Terminal job not found')
     await terminal_manager.cancel(job)
     return job.public()
+
+@app.delete('/api/projects/{project_id}/terminal/clear')
+async def clear_project_terminal(project_id: str, terminal_id: str | None = None, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    await owned_project(project_id, user, db)
+    if get_azure_workspace(project_id):
+        path = f'/projects/{project_id}/commands'
+        if terminal_id:
+            path += f'?terminal_id={urllib.parse.quote(terminal_id, safe="")}'
+        try:
+            await remote_workspace(project_id, 'DELETE', path)
+        except Exception:
+            pass
+    to_delete = [
+        jid for jid, j in terminal_manager.jobs.items()
+        if j.project_id == project_id and (not terminal_id or j.terminal_id == terminal_id)
+    ]
+    for jid in to_delete:
+        job = terminal_manager.jobs.get(jid)
+        if job:
+            await terminal_manager.cancel(job)
+            terminal_manager.jobs.pop(jid, None)
+    return {'status': 'cleared', 'count': len(to_delete)}
 
 @app.post('/projects', response_model=ProjectOut)
 async def create_project(data: ProjectCreate, user: User=Depends(current_user), db: AsyncSession=Depends(get_db)):

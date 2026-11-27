@@ -65,5 +65,10 @@ def record_failure(project_id: str, job_id: str, command: str, output: str) -> s
     with sentry_sdk.new_scope() as scope:
         scope.set_tag("project_id", project_id)
         scope.set_tag("terminal_job_id", job_id)
+        scope.set_tag("command", command)
         scope.set_context("terminal", {"command": redact(command), "output": redact(output[-12000:])})
-        return sentry_sdk.capture_message("Workspace command failed", level="error")
+        msg = f"Workspace Command Failed: '{command}'"
+        first_line = output.strip().split('\n')[0] if output.strip() else ''
+        if first_line:
+            msg += f" ({first_line[:100]})"
+        return sentry_sdk.capture_message(msg, level="error")
