@@ -13,11 +13,18 @@ def stage(name=StageName.ANALYSIS, status=StageStatus.PASSED, evidence="evidence
 def complete_stages():
     return [stage(name) for name in StageName]
 
+def healthy_builds():
+    return [SimpleNamespace(variant=variant, status='PASSED', artifacts={'class_major_versions': {'Order.class': major}})
+            for variant, major in [('baseline', 52), ('migrated', 61)]]
+
+def healthy_results(name='A'):
+    return [SimpleNamespace(variant=variant, test_name=name, status='pass') for variant in ('baseline', 'migrated')]
+
 
 def test_verified_requires_applied_migration():
     result = compute_verdict(complete_stages(), [], [], [], [], [])
     assert result.verdict == "INCONCLUSIVE"
-    assert result.reasons[0].rule_id == "NO_MIGRATION_APPLIED"
+    assert any(reason.rule_id == 'NO_MIGRATION_APPLIED' for reason in result.reasons)
 
 
 @pytest.mark.parametrize(
@@ -81,8 +88,8 @@ def test_medium_integrity_finding_needs_review():
     result = compute_verdict(
         complete_stages(),
         [],
-        [],
-        [SimpleNamespace(variant="baseline", test_name="A.test", status="pass")],
+        healthy_builds(),
+        healthy_results('A.test'),
         [SimpleNamespace(code="REVIEW", confidence="medium", message="review")],
         [SimpleNamespace(applied=True)],
     )
@@ -134,7 +141,7 @@ def test_unsafe_precedes_inconclusive_and_review():
             "INTEGRITY_NEEDS_REVIEW",
         ),
         (
-            {"results": [SimpleNamespace(variant="baseline", test_name="A", status="pass", flaky=True)],
+            {"results": [SimpleNamespace(variant="baseline", test_name="A", status="pass", flaky=True), SimpleNamespace(variant='migrated', test_name='A', status='pass')],
              "changes": [SimpleNamespace(applied=True)]},
             "NEEDS_REVIEW",
             "FLAKY_TEST",
@@ -152,7 +159,7 @@ def test_unsafe_precedes_inconclusive_and_review():
             "UNRESOLVED_DEPENDENCY_CONFLICT",
         ),
         (
-            {"coverage_available": False, "results": [SimpleNamespace(variant="baseline", test_name="A", status="pass")],
+            {"coverage_available": False, "results": healthy_results(),
              "changes": [SimpleNamespace(applied=True)]},
             "NEEDS_REVIEW",
             "COVERAGE_UNAVAILABLE",
@@ -163,10 +170,10 @@ def test_remaining_verdict_rules(kwargs, expected, rule):
     kwargs = {
         "run_stages": complete_stages(),
         "analysis_findings": kwargs.pop("findings", []),
-        "build_runs": kwargs.pop("builds", []),
+        "build_runs": kwargs.pop("builds", healthy_builds()),
         "test_results": kwargs.pop(
             "results",
-            [SimpleNamespace(variant="baseline", test_name="A", status="pass")],
+            healthy_results(),
         ),
         "test_integrity_results": kwargs.pop("integrity", []),
         "migration_changes": kwargs.pop("changes", []),
@@ -186,3 +193,27 @@ def test_required_stage_failed_is_unsafe_and_missing_is_inconclusive():
     missing = complete_stages()[:-1]
     result = compute_verdict(missing, [], [], [], [], [SimpleNamespace(applied=True)])
     assert result.verdict == "INCONCLUSIVE"
+
+
+def test_passing_build_alone_cannot_verify_a_migration():
+    result = compute_verdict(complete_stages(), [], [], healthy_results(), [], [SimpleNamespace(applied=True)])
+    assert result.verdict == 'INCONCLUSIVE'
+    assert any(reason.rule_id == 'BUILD_EVIDENCE_MISSING' for reason in result.reasons)
+
+@pytest.mark.parametrize('status,evidence', [(StageStatus.RUNNING, 'evidence'), (StageStatus.PASSED, None)])
+def test_incomplete_stage_cannot_verify(status, evidence):
+    stages = complete_stages()
+    stages[0] = stage(StageName.ANALYSIS, status, evidence)
+    assert compute_verdict(stages, [], healthy_builds(), healthy_results(), [], [SimpleNamespace(applied=True)]).verdict == 'INCONCLUSIVE'
+
+def test_mixed_bytecode_versions_cannot_pass_by_containing_61():
+    builds = healthy_builds()
+    builds[1].artifacts['class_major_versions']['Legacy.class'] = 52
+    assert compute_verdict(complete_stages(), [], builds, healthy_results(), [], [SimpleNamespace(applied=True)]).verdict == 'UNSAFE'
+
+def test_full_evidence_can_be_verified_and_missing_coverage_is_disclosed():
+    args = (complete_stages(), [], healthy_builds(), healthy_results(), [], [SimpleNamespace(applied=True)])
+    assert compute_verdict(*args, coverage_available=True).verdict == 'VERIFIED_BY_CHECKS'
+    result = compute_verdict(*args)
+    assert result.verdict == 'NEEDS_REVIEW'
+    assert any(reason.rule_id == 'COVERAGE_UNAVAILABLE' for reason in result.reasons)

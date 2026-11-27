@@ -8,7 +8,10 @@ __v0_jsx-dev-runtime.ts
 .vercel/
 
 # Environment variables
+.env
 .env*.local
+.venv/
+*.tsbuildinfo
 
 # Common ignores
 node_modules
@@ -17,5 +20,6 @@ __pycache__/
 *.pyc
 *.db
 results/
+migrationguard-workspaces/
 .DS_Store
 .neon

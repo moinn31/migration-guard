@@ -54,6 +54,8 @@ def test_service_credentials_are_redacted(monkeypatch):
     monkeypatch.setattr(settings, 'camber_api_key', 'real-test-secret-value')
     assert 'real-test-secret-value' not in observability.redact('value real-test-secret-value')
     assert 'abc123' not in observability.redact('authorization=Bearer abc123')
+    monkeypatch.setattr(settings, 'azure_workspaces', {'project': {'url': 'https://workspace.example', 'token': 'nested-workspace-secret'}})
+    assert 'nested-workspace-secret' not in observability.redact('credential: nested-workspace-secret')
 
 
 @pytest.mark.asyncio

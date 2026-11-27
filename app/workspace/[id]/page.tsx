@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useMemo } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { UserButton } from '@clerk/nextjs'
+import { UserButton, useAuth } from '@clerk/nextjs'
 import {
   Folder,
   FolderOpen,
@@ -30,7 +30,8 @@ import {
   Layers,
   File as FileIcon,
 } from 'lucide-react'
-import { getActiveToken } from '@/lib/api/client'
+import { authenticatedFetch } from '@/lib/api/client'
+import { isolatedPreviewUrl } from '@/lib/preview'
 
 interface FileItem {
   id: string
@@ -71,17 +72,25 @@ interface WorkspaceData {
     status_message: string
     node_analysis?: NodeAnalysis
     default_branch: string
+    kind?: 'import' | 'verification'
+    verdict?: string | null
   } | null
   files_count: number
   files: FileItem[]
+  preview_url?: string | null
+  terminal_enabled?: boolean
+  verification_enabled?: boolean
+  agent_mode?: 'camber' | 'local_analysis'
 }
 
 export default function WorkspacePage() {
   const { id: projectId } = useParams<{ id: string }>()
   const router = useRouter()
+  const { isLoaded, isSignedIn } = useAuth()
 
   const [loading, setLoading] = useState(true)
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null)
+  const previewUrl = typeof window === 'undefined' ? null : isolatedPreviewUrl(workspace?.preview_url, window.location.origin)
   const [selectedFilePath, setSelectedFilePath] = useState<string>('')
   const [selectedFileContent, setSelectedFileContent] = useState<string>('')
   const [fileLoading, setFileLoading] = useState(false)
@@ -91,13 +100,64 @@ export default function WorkspacePage() {
 
   // View mode tab: 'code' | 'preview'
   const [viewMode, setViewMode] = useState<'code' | 'preview'>('code')
+  const [previewVersion, setPreviewVersion] = useState(0)
+  const [workspaceError, setWorkspaceError] = useState('')
+  const [verifying, setVerifying] = useState(false)
+  async function startVerification() {
+    setVerifying(true)
+    setWorkspaceError('')
+    try {
+      const response = await authenticatedFetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/projects/${projectId}/runs`, { method: 'POST' })
+      const data = await response.json()
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Unable to start verification')
+      await loadWorkspace()
+      router.push(`/runs/${data.id}/tests`)
+    } catch (error) { setWorkspaceError(error instanceof Error ? error.message : 'Unable to start verification') }
+    finally { setVerifying(false) }
+  }
 
   // Chat/Follow-up prompt state
   const [promptInput, setPromptInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const [commandInput, setCommandInput] = useState('')
+  const [terminalError, setTerminalError] = useState('')
+  const [jobs, setJobs] = useState<Array<{ id: string; command: string; status: string; output: string; process_running: boolean; notices: Array<{ id: string; text: string }> }>>([])
+  async function workspaceRequest(path: string, options: RequestInit = {}) {
+    const response = await authenticatedFetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}${path}`, {
+      ...options, headers: { 'Content-Type': 'application/json', ...options.headers },
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Workspace request failed')
+    return data
+  }
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || !workspace?.terminal_enabled) return
+    let active = true
+    const refresh = async () => {
+      try { const data = await workspaceRequest('/terminal/jobs'); if (active) { setJobs(data); setTerminalError('') } }
+      catch (error) { if (active) setTerminalError(error instanceof Error ? error.message : 'Unable to load terminal jobs') }
+    }
+    refresh()
+    const timer = setInterval(refresh, 2000)
+    return () => { active = false; clearInterval(timer) }
+  }, [projectId, isLoaded, isSignedIn, workspace?.terminal_enabled])
+  async function startCommand() {
+    if (!commandInput.trim()) return
+    setTerminalError('')
+    try {
+      await workspaceRequest('/terminal/jobs', { method: 'POST', body: JSON.stringify({ command: commandInput, terminal_id: `terminal-${Date.now()}` }) })
+      setCommandInput('')
+      setJobs(await workspaceRequest('/terminal/jobs'))
+    } catch (error) { setTerminalError(error instanceof Error ? error.message : 'Unable to start command') }
+  }
+  async function stopCommand(jobId: string) {
+    try { await workspaceRequest(`/terminal/jobs/${jobId}`, { method: 'DELETE' }); setJobs(await workspaceRequest('/terminal/jobs')) }
+    catch (error) { setTerminalError(error instanceof Error ? error.message : 'Unable to stop command') }
+  }
   const [chatMessages, setChatMessages] = useState<Array<{ role: 'assistant' | 'user'; text: string; time?: string }>>([
     {
       role: 'assistant',
-      text: 'Repository cloned into isolated environment. All project source files have been stored into Neon PostgreSQL. Ready for migration analysis and code modernization.',
+      text: 'Workspace assistant. Ask about the imported project or use the terminal below to run a command on the configured worker.',
       time: 'Just now',
     },
   ])
@@ -105,17 +165,13 @@ export default function WorkspacePage() {
   // 1. Load Workspace & Files from Backend (Neon DB)
   async function loadWorkspace() {
     try {
-      const token = await getActiveToken()
-      const headers: Record<string, string> = {}
-      if (token) headers['Authorization'] = `Bearer ${token}`
-
-      const res = await fetch(
+      const res = await authenticatedFetch(
         `${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/workspace`,
-        { headers }
       )
       if (res.ok) {
         const data: WorkspaceData = await res.json()
         setWorkspace(data)
+        setWorkspaceError('')
 
         // Select initial file (e.g. package.json or README.md or first file)
         if (!selectedFilePath && data.files && data.files.length > 0) {
@@ -128,9 +184,10 @@ export default function WorkspacePage() {
             loadFileContent(defaultFile.path)
           }
         }
-      }
+      } else setWorkspaceError('Unable to load this workspace. Refresh your sign-in session and retry.')
     } catch (err) {
       console.error('Failed to load workspace:', err)
+      setWorkspaceError('Unable to reach the workspace API.')
     } finally {
       setLoading(false)
     }
@@ -140,13 +197,8 @@ export default function WorkspacePage() {
   async function loadFileContent(path: string) {
     setFileLoading(true)
     try {
-      const token = await getActiveToken()
-      const headers: Record<string, string> = {}
-      if (token) headers['Authorization'] = `Bearer ${token}`
-
-      const res = await fetch(
+      const res = await authenticatedFetch(
         `${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/files/content?path=${encodeURIComponent(path)}`,
-        { headers }
       )
       if (res.ok) {
         const data = await res.json()
@@ -164,15 +216,16 @@ export default function WorkspacePage() {
 
   // Poll workspace every 3 seconds while run state is not COMPLETED/FAILED
   useEffect(() => {
+    if (!isLoaded || !isSignedIn) return
     loadWorkspace()
     const interval = setInterval(() => {
-      if (workspace?.latest_run?.state && ['COMPLETED', 'FAILED'].includes(workspace.latest_run.state)) {
+      if (workspace?.latest_run?.state && ['COMPLETED', 'FAILED', 'INCONCLUSIVE', 'AWAITING_APPROVAL', 'ACCEPTED', 'REJECTED'].includes(workspace.latest_run.state)) {
         return
       }
       loadWorkspace()
     }, 3000)
     return () => clearInterval(interval)
-  }, [projectId, workspace?.latest_run?.state])
+  }, [projectId, workspace?.latest_run?.state, isLoaded, isSignedIn])
 
   // Select file handler
   function handleSelectFile(path: string) {
@@ -201,19 +254,21 @@ export default function WorkspacePage() {
   }
 
   // Send message
-  function handleSendPrompt() {
-    if (!promptInput.trim()) return
+  async function handleSendPrompt() {
+    if (!promptInput.trim() || sending) return
     const userText = promptInput.trim()
     setPromptInput('')
     setChatMessages((prev) => [
       ...prev,
       { role: 'user', text: userText, time: 'Just now' },
-      {
-        role: 'assistant',
-        text: `Analysis recorded: "${userText}". Agent communication will connect here in the next step to execute interactive code migrations.`,
-        time: 'Just now',
-      },
     ])
+    setSending(true)
+    try {
+      const data = await workspaceRequest('/chat', { method: 'POST', body: JSON.stringify({ message: userText }) })
+      setChatMessages(prev => [...prev, { role: 'assistant', text: data.reply, time: 'Just now' }])
+    } catch (error) {
+      setChatMessages(prev => [...prev, { role: 'assistant', text: error instanceof Error ? error.message : 'Assistant unavailable', time: 'Just now' }])
+    } finally { setSending(false) }
   }
 
   // Build hierarchical folder tree from flat file list
@@ -416,7 +471,7 @@ export default function WorkspacePage() {
             </span>
           ) : (
             <span className="flex items-center gap-1 text-[11px] font-medium text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full animate-pulse">
-              <RefreshCw className="size-3 animate-spin" />
+              {['AWAITING_APPROVAL', 'ACCEPTED', 'REJECTED', 'INCONCLUSIVE', 'FAILED'].includes(workspace?.latest_run?.state ?? '') ? <CheckCircle2 className="size-3" /> : <RefreshCw className="size-3 animate-spin" />}
               {workspace?.latest_run?.state ?? 'SYNCING'}
             </span>
           )}
@@ -434,14 +489,16 @@ export default function WorkspacePage() {
             {/* Run Progress Status */}
             <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-3 space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400 font-medium">Cloning & DB Storage</span>
+                <span className="text-slate-400 font-medium">{workspace?.latest_run?.kind === 'verification' ? 'Migration verification' : 'Cloning & DB Storage'}</span>
                 <span className="text-cyan-300 font-mono text-[10px] bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800">
                   {workspace?.latest_run?.state ?? 'INIT'}
                 </span>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                {workspace?.latest_run?.status_message || 'Initializing migration container in Azure...'}
+                {workspace?.latest_run?.status_message || 'Loading project status...'}
               </p>
+              {workspace?.verification_enabled && <button onClick={startVerification} disabled={verifying || (workspace?.latest_run?.kind === 'verification' && !['FAILED', 'INCONCLUSIVE', 'AWAITING_APPROVAL', 'ACCEPTED', 'REJECTED'].includes(workspace.latest_run.state))} className="rounded bg-cyan-300 px-3 py-2 text-xs text-black disabled:opacity-40">{verifying ? 'Starting...' : 'Run Java 8 to 17 verification'}</button>}
+              {workspace?.latest_run?.kind === 'verification' && <Link href={`/runs/${workspace.latest_run.id}/tests`} className="block text-xs text-cyan-200">View tests and coverage</Link>}
             </div>
 
             {/* Detected Node.js Specs Card */}
@@ -507,7 +564,7 @@ export default function WorkspacePage() {
                         : 'bg-cyan-500/10 border border-cyan-500/20 text-cyan-100 ml-3'
                     }`}
                   >
-                    <p className="leading-relaxed">{msg.text}</p>
+                    <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
                     {msg.time && (
                       <span className="text-[10px] text-slate-500 block mt-1 text-right">{msg.time}</span>
                     )}
@@ -519,6 +576,8 @@ export default function WorkspacePage() {
 
           {/* Chat / Prompt Input Form */}
           <div className="p-3 border-t border-white/[0.08] bg-[#090d14]">
+            <p className="mb-2 text-[10px] text-slate-400">{workspace?.agent_mode === 'camber' ? 'Connected AI assistant · suggestions require review' : 'Local project analysis · no external AI required'}</p>
+            <div className="mb-3 flex flex-wrap gap-1.5">{['Explain this project', 'Plan the Java 8 to Java 17 migration', 'Summarize verification results and coverage'].map(prompt => <button key={prompt} onClick={() => setPromptInput(prompt)} className="rounded border border-white/10 px-2 py-1 text-left text-[10px] text-cyan-200">{prompt}</button>)}</div>
             <div className="relative">
               <textarea
                 value={promptInput}
@@ -535,7 +594,7 @@ export default function WorkspacePage() {
               />
               <button
                 onClick={handleSendPrompt}
-                disabled={!promptInput.trim()}
+                disabled={!promptInput.trim() || sending}
                 className="absolute right-2.5 bottom-3.5 text-cyan-400 hover:text-cyan-200 disabled:opacity-40 transition-colors"
               >
                 <Send className="size-3.5" />
@@ -544,7 +603,7 @@ export default function WorkspacePage() {
             <div className="flex items-center justify-between mt-2 text-[10px] text-slate-500">
               <span className="flex items-center gap-1">
                 <Sparkles className="size-3 text-cyan-400" />
-                AI Migration Assistant ready
+                {sending ? 'Assistant responding…' : 'AI Migration Assistant'}
               </span>
               <span>Enter to send</span>
             </div>
@@ -618,6 +677,16 @@ export default function WorkspacePage() {
             )}
           </div>
 
+          {workspaceError && <p role="alert" className="p-4 text-sm text-red-300">{workspaceError}</p>}
+          {viewMode === 'preview' ? <section className="flex min-h-0 flex-1 flex-col" aria-label="Application preview">
+            {previewUrl ? <>
+              <div className="flex items-center justify-between gap-3 border-b border-white/10 p-3 text-xs text-slate-300">
+                <span className="truncate">{previewUrl}</span>
+                <div className="flex shrink-0 gap-3"><button onClick={() => setPreviewVersion(value => value + 1)}>Reload preview</button><a href={previewUrl} target="_blank" rel="noopener noreferrer">Open in new tab</a></div>
+              </div>
+              <iframe key={previewVersion} src={previewUrl} title={`${workspace?.project.name} application preview`} sandbox="allow-scripts allow-forms allow-same-origin" referrerPolicy="no-referrer" className="min-h-96 w-full flex-1 border-0 bg-white" />
+            </> : <div className="p-8 text-sm text-slate-400">No application preview is running for this project. Ask the assistant how to start the application on a preview worker.</div>}
+          </section> : <>
           {/* Code Body with Line Numbers */}
           <div className="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed">
             {fileLoading ? (
@@ -646,6 +715,21 @@ export default function WorkspacePage() {
               </div>
             )}
           </div>
+          </>}
+          <section className="max-h-72 overflow-auto border-t border-white/10 p-4" aria-label="Workspace terminal">
+            <h2 className="mb-2 text-sm font-semibold text-white">Workspace terminal</h2>
+            {!workspace?.terminal_enabled && <p className="mb-3 text-xs text-slate-400">Command execution is disabled on this host. Use the running Preview or a configured isolated worker.</p>}
+            <form className="flex gap-2" onSubmit={event => { event.preventDefault(); startCommand() }}>
+              <input aria-label="Terminal command" value={commandInput} onChange={event => setCommandInput(event.target.value)} placeholder="Command to run in this project" className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 p-2 text-xs text-white" />
+              <button className="rounded bg-cyan-300 px-3 text-xs text-black disabled:opacity-40" disabled={!commandInput.trim() || !workspace?.terminal_enabled}>Run</button>
+            </form>
+            {terminalError && <p role="alert" className="mt-2 text-xs text-red-300">{terminalError}</p>}
+            {jobs.map(job => <div key={job.id} className="mt-3 rounded border border-white/10 p-2 text-xs text-slate-300">
+              <p>{job.command} — {job.status} {['queued', 'running', 'recovering'].includes(job.status) && <button onClick={() => stopCommand(job.id)} className="ml-2 text-red-300">Stop</button>}</p>
+              <pre className="mt-2 whitespace-pre-wrap">{job.output}</pre>
+              {job.notices.map(notice => <p key={notice.id} className="mt-1 text-amber-200">{notice.text}</p>)}
+            </div>)}
+          </section>
         </main>
       </div>
     </div>

@@ -12,10 +12,17 @@ def redact(text: str) -> str:
     text = str(text)
     # Include dotenv values (not just os.environ) and credentials inherited by workers.
     values = {**settings.model_dump(), **os.environ}
-    for name, value in values.items():
-        if any(part in name.lower() for part in ("secret", "token", "password", "api_key", "database_url", "dsn")):
-            if isinstance(value, str) and len(value) >= 8:
-                text = text.replace(value, "[REDACTED]")
+    def secrets(value):
+        if not isinstance(value, dict):
+            return
+        for name, item in value.items():
+            if isinstance(item, dict):
+                yield from secrets(item)
+            elif any(part in name.lower() for part in ("secret", "token", "password", "api_key", "database_url", "dsn")):
+                if isinstance(item, str) and len(item) >= 8:
+                    yield item
+    for value in secrets(values):
+        text = text.replace(value, "[REDACTED]")
     text = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text)
     return re.sub(r"(?i)((?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*)(?:Bearer\s+)?[^\s,;]+", r"\1[REDACTED]", text)
 
@@ -24,7 +31,7 @@ def _scrub(value):
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: "[REDACTED]" if any(part in str(key).lower() for part in ("authorization", "cookie", "password", "secret", "api_key")) else _scrub(item) for key, item in value.items()}
+        return {key: "[REDACTED]" if any(part in str(key).lower() for part in ("authorization", "cookie", "password", "secret", "api_key", "token")) else _scrub(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_scrub(item) for item in value]
     return value

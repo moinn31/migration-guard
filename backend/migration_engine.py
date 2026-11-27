@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 from .config import settings
 from .ingestion import _content_hash, copy_for_work
+from .sandbox import docker_executable
 
 
 @dataclass(frozen=True)
@@ -165,13 +166,13 @@ def run_openrewrite_docker(
 ) -> str:
     if docker_enabled is None:
         docker_enabled = settings.migrationguard_enable_execution
-    if not docker_enabled:
+    if not docker_enabled or not settings.openrewrite_enabled:
         return ""
     root = Path(working).resolve()
     target = Path(tempfile.mkdtemp(prefix="migrationguard-rewrite-"))
     recipe_list = recipes or [item.strip() for item in settings.openrewrite_recipes.split(",") if item.strip()]
     command = [
-        "docker", "run", "--rm", "--user", "1000:1000", "--cpus", "1", "--memory", "1g",
+        docker_executable(), "run", "--rm", "--user", "1000:1000", "--cpus", "1", "--memory", "1g",
         "--network", "bridge" if settings.maven_mirror else "none",
         "-v", f"{root}:/workspace:rw", "-v", f"{target}:/root/.m2",
         "-w", "/workspace", f"maven:3.9-eclipse-temurin-17", "mvn", "-B",
@@ -184,7 +185,10 @@ def run_openrewrite_docker(
     if settings.maven_mirror:
         command.append(f"-Dmirror.url={settings.maven_mirror}")
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=300, check=False).stdout
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+        if result.returncode:
+            raise RuntimeError(f'OpenRewrite failed (exit {result.returncode}): {(result.stdout + result.stderr)[-4000:]}')
+        return result.stdout
     finally:
         shutil.rmtree(target, ignore_errors=True)
 

@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import json
 import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -109,6 +110,24 @@ async def analyze_project_context(project_id: str, db: AsyncSession) -> Dict[str
     recommended_commands: List[str] = []
     details: Dict[str, Any] = {}
 
+    if 'pom.xml' in file_map:
+        manifests_found.append('pom.xml')
+        detected_stack.extend(['Java', 'Maven'])
+        recommended_commands.append('mvn test')
+        try:
+            pom = ET.fromstring(file_map['pom.xml'])
+            def value(name):
+                return next((node.text.strip() for node in pom.iter() if node.tag.rsplit('}', 1)[-1] == name and node.text), None)
+            details['java_target'] = value('maven.compiler.release') or value('maven.compiler.target') or value('maven.compiler.source')
+            details['artifact'] = value('artifactId')
+            details['package_manager'] = 'maven'
+            details['java_files'] = [path for path in file_paths if path.endswith('.java')]
+            details['test_files'] = [path for path in details['java_files'] if '/test/' in path]
+            import re
+            details['route_hints'] = sorted({match for path, source in file_map.items() if path.startswith('src/main/') and path.endswith('.java') for match in re.findall(r'"(/[A-Za-z0-9_/-]*)"', source)})
+        except ET.ParseError:
+            details['manifest_error'] = 'pom.xml could not be parsed'
+
     # 1. Node.js Ecosystem
     if "package.json" in file_map:
         manifests_found.append("package.json")
@@ -180,7 +199,7 @@ async def analyze_project_context(project_id: str, db: AsyncSession) -> Dict[str
     # Summary
     stack_label = ", ".join(detected_stack) if detected_stack else "Generic Codebase"
     summary = (
-        f"Reading Agent analyzed {len(files)} files stored in Neon PostgreSQL. "
+        f"Project analysis inspected {len(files)} stored files. "
         f"Detected environment: {stack_label}. "
         f"Found configuration manifests: {', '.join(manifests_found) or 'None'}. "
         f"Generated {len(recommended_commands)} dependency setup command(s)."

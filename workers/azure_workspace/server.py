@@ -35,6 +35,11 @@ class ImportRequest(BaseModel):
 class CommandRequest(BaseModel):
     command: str = Field(min_length=1, max_length=4000)
     terminal_id: str = 'term-1'
+    cwd: str = '.'
+
+@app.get('/status')
+def workspace_status():
+    return {'initialized': ROOT.is_dir()}
 
 
 def confined(path: Path) -> Path:
@@ -99,7 +104,9 @@ async def start_command(body: CommandRequest):
         raise HTTPException(409, 'Repository is not initialized')
     if any(job['terminal_id'] == body.terminal_id and job['status'] == 'running' for job in jobs.values()):
         raise HTTPException(409, 'Terminal is busy')
-    cwd = directories.get(body.terminal_id, ROOT)
+    cwd = confined(directories.get(body.terminal_id, ROOT) / body.cwd)
+    if not cwd.is_dir():
+        raise HTTPException(422, 'Command directory does not exist')
     identifier = uuid.uuid4().hex
     job = {'id': identifier, 'terminal_id': body.terminal_id, 'command': body.command, 'cwd': str(cwd), 'status': 'running', 'output': '', 'exit_code': None}
     jobs[identifier] = job
@@ -120,6 +127,7 @@ async def start_command(body: CommandRequest):
         process = None
         try:
             process = await asyncio.create_subprocess_exec('/bin/bash', '-c', body.command, cwd=str(cwd), env=environment, start_new_session=True, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            job['_process'] = process
             async with asyncio.timeout(1800):
                 while chunk := await process.stdout.read(4096):
                     job['output'] = (job['output'] + chunk.decode(errors='replace'))[-100000:]
@@ -132,11 +140,27 @@ async def start_command(body: CommandRequest):
             job.update(status='failed', exit_code=124, output=job['output'] + '\nCommand stopped or timed out')
 
     task = asyncio.create_task(execute())
+    job['_task'] = task
     tasks.add(task)
     task.add_done_callback(tasks.discard)
-    return job
+    return public_job(job)
 
 
 @app.get('/commands')
 def list_commands():
-    return list(jobs.values())
+    return [public_job(job) for job in jobs.values()]
+
+def public_job(job):
+    return {key: value for key, value in job.items() if not key.startswith('_')}
+
+@app.delete('/commands/{job_id}')
+async def cancel_command(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, 'Command not found')
+    task = job.get('_task')
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        job['status'] = 'cancelled'
+    return public_job(job)

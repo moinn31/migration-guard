@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable
+import ast
+from .coverage import coverage_changes
 
 
 VERIFIED_CAVEAT = "Passing checks do not prove behavioral equivalence."
@@ -43,7 +45,7 @@ def compute_verdict(
     baseline_test_count: int | None = None,
     migrated_test_count: int | None = None,
     migration_applied: bool | None = None,
-    coverage_available: bool = True,
+    coverage_available: bool | None = None,
 ) -> VerdictResult:
     stages = list(run_stages)
     findings = list(analysis_findings)
@@ -51,6 +53,9 @@ def compute_verdict(
     results = list(test_results)
     integrity = list(test_integrity_results)
     changes = list(migration_changes)
+    coverage_by_variant = {_value(getattr(build, 'variant', 'migrated')): getattr(build, 'artifacts', {}).get('coverage') for build in builds}
+    if coverage_available is None:
+        coverage_available = all(bool(coverage_by_variant.get(variant, {}) and coverage_by_variant[variant].get('measured')) for variant in ('baseline', 'migrated'))
     reasons: list[VerdictReason] = []
 
     def add(rule: str, severity: str, ref: str, message: str) -> None:
@@ -68,6 +73,10 @@ def compute_verdict(
     migrated = {getattr(item, "test_name", ""): item for item in results if _value(getattr(item, "variant", "migrated")) == "migrated"}
     for name, old in baseline.items():
         new = migrated.get(name)
+        if new is None:
+            add('TEST_RESULT_MISSING', 'critical', f'test_result:{name}', f'Baseline test {name} is missing from migrated results.')
+        elif _value(getattr(old, 'status', '')).lower() != 'skipped' and _value(getattr(new, 'status', '')).lower() == 'skipped':
+            add('TEST_NEWLY_SKIPPED', 'critical', f'test_result:{name}', f'Baseline test {name} became skipped.')
         if new and _value(getattr(old, "status", "")).lower() == "pass" and _value(getattr(new, "status", "")).lower() in {"fail", "error"}:
             add("BASELINE_PASS_MIGRATED_FAIL", "critical", f"test_result:{name}", f"Test {name} passed in baseline and failed in migrated.")
     for item in integrity:
@@ -80,16 +89,34 @@ def compute_verdict(
         if _value(getattr(item, "code", "")).upper() == "CLASS_MAJOR_VERSION":
             evidence = str(getattr(item, "evidence", ""))
             migrated_evidence = evidence.split("migrated=", 1)[-1]
-            if "61" not in migrated_evidence:
+            try:
+                values = ast.literal_eval(migrated_evidence)
+                versions = list(values.values()) if isinstance(values, dict) else list(values)
+            except (ValueError, TypeError, SyntaxError):
+                versions = []
+            if versions and any(version != target_major for version in versions):
                 add("CLASS_MAJOR_VERSION_NOT_61", "critical", f"test_integrity:{getattr(item, 'id', 'class-major')}", "Java 17 output did not have class major version 61.")
     if baseline_test_count is not None and migrated_test_count is not None and migrated_test_count < baseline_test_count:
         add("TEST_COUNT_DECREASED", "critical", "test_count", "Migrated test count decreased.")
 
     if any(_value(getattr(stage, "status", "")).upper() == "SKIPPED" for stage in stages):
         add("REQUIRED_STAGE_SKIPPED", "high", "run_stages", "A required stage was skipped.")
-    required_names = {"analysis", "test_integrity", "build_and_test", "risk_assessment", "report", "verdict"}
+    required_names = {"analysis", 'migrating', "test_integrity", "build_and_test", "risk_assessment", "report", "verdict"}
     if not required_names.issubset({_value(getattr(stage, "stage_name", "")) for stage in stages}):
         add("REQUIRED_STAGE_MISSING", "high", "run_stages", "A required stage is missing.")
+    if any(_value(getattr(stage, 'stage_name', '')) in required_names and
+           (_value(getattr(stage, 'status', '')).upper() != 'PASSED' or not getattr(stage, 'evidence_reference', None))
+           for stage in stages):
+        add('REQUIRED_STAGE_INCOMPLETE', 'high', 'run_stages', 'A required stage lacks passed status or evidence.')
+    by_variant = {_value(getattr(build, 'variant', 'migrated')): build for build in builds}
+    if any(variant not in by_variant or _value(getattr(by_variant[variant], 'status', '')).upper() != 'PASSED' for variant in ('baseline', 'migrated')):
+        add('BUILD_EVIDENCE_MISSING', 'high', 'build_runs', 'Both baseline and migrated builds must have passing evidence.')
+    migrated_build = by_variant.get('migrated')
+    class_versions = getattr(migrated_build, 'artifacts', {}).get('class_major_versions', {})
+    if not class_versions:
+        add('CLASS_VERSION_EVIDENCE_MISSING', 'high', 'build_runs', 'Migrated bytecode version evidence is missing.')
+    elif any(version != target_major for version in class_versions.values()):
+        add('CLASS_MAJOR_VERSION_NOT_61', 'critical', 'build_runs', 'Migrated output contains classes outside the Java 17 target version.')
     if not docker_execution_enabled:
         add("DOCKER_EXECUTION_DISABLED", "high", "settings:migrationguard_enable_execution", "Docker execution is disabled.")
     if migration_applied is False or (migration_applied is None and not any(bool(getattr(change, "applied", False)) for change in changes)):
@@ -112,6 +139,11 @@ def compute_verdict(
         add("UNRESOLVED_DEPENDENCY_CONFLICT", "medium", "dependencies", "Dependency conflicts remain unresolved.")
     if not coverage_available:
         add("COVERAGE_UNAVAILABLE", "low", "coverage", "Coverage evidence is unavailable.")
+    if coverage_available:
+        for issue in coverage_changes(coverage_by_variant.get('baseline'), coverage_by_variant.get('migrated')):
+            add('COVERAGE_DECREASED', 'medium', f"coverage:{issue['module']}:{issue['metric']}", issue['message'])
+        if any(coverage.get('missing_modules') or any(module.get('missing_classes') for module in coverage.get('modules', {}).values()) for coverage in coverage_by_variant.values() if coverage):
+            add('COVERAGE_SCOPE_INCOMPLETE', 'medium', 'coverage', 'Some compiled classes or modules are outside the measured coverage scope.')
 
     if any(reason.severity == "critical" or reason.rule_id in {
         "REQUIRED_STAGE_FAILED", "MIGRATED_BUILD_FAILED", "BASELINE_PASS_MIGRATED_FAIL",
@@ -122,6 +154,7 @@ def compute_verdict(
     elif any(reason.rule_id in {
         "REQUIRED_STAGE_SKIPPED", "REQUIRED_STAGE_MISSING", "DOCKER_EXECUTION_DISABLED",
         "NO_MIGRATION_APPLIED", "BASELINE_ZERO_TESTS", "BASELINE_BUILD_FAILED",
+        'REQUIRED_STAGE_INCOMPLETE', 'BUILD_EVIDENCE_MISSING', 'CLASS_VERSION_EVIDENCE_MISSING',
     } for reason in reasons):
         verdict = "INCONCLUSIVE"
     elif reasons:

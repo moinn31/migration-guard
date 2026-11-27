@@ -34,14 +34,12 @@ def confusion_matrix(labels: Iterable[bool], predictions: Iterable[bool]) -> Cou
     )
 
 
-def summarize_rows(rows: list[dict]) -> dict[str, float]:
-    if not rows:
-        return {"build_success_rate": 0.0, "test_preservation_rate": 0.0, "regression_detection_rate": 0.0, "false_positive_rate": 0.0, "unnecessary_change_rate": 0.0}
-    total = len(rows)
-    return {
-        "build_success_rate": sum(row.get("build_success", False) for row in rows) / total,
-        "test_preservation_rate": sum(row.get("tests_preserved", False) for row in rows) / total,
-        "regression_detection_rate": sum(row.get("regression_detected", False) for row in rows) / total,
-        "false_positive_rate": sum(row.get("false_positive", False) for row in rows) / total,
-        "unnecessary_change_rate": sum(row.get("unnecessary_change", False) for row in rows) / total,
-    }
+def summarize_rows(rows: list[dict]) -> dict[str, float | None]:
+    fields = {'build_success_rate': 'build_success', 'test_preservation_rate': 'tests_preserved',
+              'regression_detection_rate': 'regression_detected', 'false_positive_rate': 'false_positive',
+              'unnecessary_change_rate': 'unnecessary_change'}
+    summary = {}
+    for name, field in fields.items():
+        observed = [row[field] for row in rows if isinstance(row.get(field), bool)]
+        summary[name] = sum(observed) / len(observed) if observed else None
+    return summary

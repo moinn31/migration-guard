@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from backend.db import Base
-from backend.models import User, Project, MigrationRun, TestCase as Case, TestResult
+from backend.models import User, Project, MigrationRun, TestCase as Case, TestResult as Result
 from backend.main import delete_project_endpoint
 
 
@@ -31,7 +31,7 @@ async def test_deletion_handles_project_scoped_tests_and_preserves_other_project
         keep_case = Case(project_id=other.id, name='keep')
         db.add_all([run, case, keep_case])
         await db.flush()
-        db.add(TestResult(run_id=run.id, test_case_id=case.id, status='pass'))
+        db.add(Result(run_id=run.id, test_case_id=case.id, status='pass'))
         await db.commit()
         result = await delete_project_endpoint(target.id, user, db)
         assert result['status'] == 'deleted'

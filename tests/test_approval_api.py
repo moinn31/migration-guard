@@ -1,5 +1,83 @@
 import httpx
 import pytest
+
+@pytest.mark.asyncio
+async def test_workspace_commands_require_explicit_execution_and_ownership(approval_client, monkeypatch):
+    from backend.config import settings
+    monkeypatch.setattr(settings, 'workspace_execution_enabled', False)
+    client, _, _, _ = approval_client
+    projects = (await client.get('/projects')).json()
+    project_id = projects[0]['id']
+    disabled = await client.post(f'/api/projects/{project_id}/terminal/jobs', json={'command': 'echo test'})
+    assert disabled.status_code == 503
+    unauthorized = await client.post('/api/projects/other/terminal/jobs', json={'command': 'echo test'})
+    assert unauthorized.status_code == 404
+    assert (await client.get(f'/api/projects/{project_id}/terminal/jobs')).json() == []
+
+@pytest.mark.asyncio
+async def test_workspace_chat_returns_actual_agent_response(approval_client, monkeypatch):
+    from backend import camber_service
+    from backend.config import settings
+    monkeypatch.setattr(settings, 'camber_chat_agent', 'test-agent')
+    monkeypatch.setattr(settings, 'camber_mcp_access_token', 'test-token')
+    async def ask(tag, message):
+        assert 'Explain this project' in message
+        return 'Response from the configured agent'
+    monkeypatch.setattr(camber_service, 'ask_agent', ask)
+    client, _, _, _ = approval_client
+    project_id = (await client.get('/projects')).json()[0]['id']
+    response = await client.post(f'/api/projects/{project_id}/chat', json={'message': 'Explain this project'})
+    assert response.status_code == 200
+    assert response.json()['reply'] == 'Response from the configured agent'
+
+@pytest.mark.asyncio
+async def test_local_assistant_and_workspace_capabilities(approval_client, monkeypatch):
+    from backend.config import settings
+    monkeypatch.setattr(settings, 'camber_chat_agent', None)
+    monkeypatch.setattr(settings, 'workspace_execution_enabled', False)
+    client, _, _, _ = approval_client
+    project_id = (await client.get('/projects')).json()[0]['id']
+    monkeypatch.setattr(settings, 'project_previews', {project_id: 'http://127.0.0.1:8080'})
+    workspace = (await client.get(f'/api/projects/{project_id}/workspace')).json()
+    assert workspace['preview_url'] == 'http://127.0.0.1:8080'
+    assert workspace['terminal_enabled'] is False
+    response = await client.post(f'/api/projects/{project_id}/chat', json={'message': 'Summarize verification coverage'})
+    assert response.status_code == 200
+    assert response.json()['mode'] == 'local_analysis'
+    assert 'No verification report' in response.json()['reply']
+    assert (await client.get('/api/projects/other/workspace')).status_code == 404
+
+@pytest.mark.asyncio
+async def test_benchmarks_do_not_invent_measurements(approval_client):
+    client, _, _, _ = approval_client
+    response = await client.get('/benchmarks')
+    assert response.status_code == 200
+    assert response.json()['items'] == []
+    assert response.json()['metrics']['build_success_rate'] is None
+
+@pytest.mark.asyncio
+async def test_configured_azure_workspace_is_used_instead_of_host(approval_client, monkeypatch):
+    from backend import main
+    from backend.config import settings
+    client, _, _, _ = approval_client
+    project_id = (await client.get('/projects')).json()[0]['id']
+    monkeypatch.setattr(settings, 'workspace_execution_enabled', True)
+    monkeypatch.setattr(settings, 'azure_workspaces', {project_id: {'url': 'https://workspace.example', 'token': 'test'}})
+    calls = []
+    async def remote(project, method, path, body=None):
+        calls.append((method, path))
+        assert project == project_id
+        if path == '/status':
+            return {'initialized': True}
+        job = {'id': 'remote-job', 'command': 'npm test', 'status': 'running', 'output': '', 'terminal_id': 'test'}
+        return [job] if method == 'GET' else job
+    monkeypatch.setattr(main, 'remote_workspace', remote)
+    started = await client.post(f'/api/projects/{project_id}/terminal/jobs', json={'command': 'npm test'})
+    assert started.status_code == 202
+    assert started.json()['id'] == 'remote-job'
+    assert (await client.get(f'/api/projects/{project_id}/terminal/jobs')).json()[0]['id'] == 'remote-job'
+    assert (await client.delete(f'/api/projects/{project_id}/terminal/jobs/remote-job')).status_code == 200
+    assert ('DELETE', '/commands/remote-job') in calls
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend import auth

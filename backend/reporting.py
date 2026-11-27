@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import AnalysisFinding, BuildRun, MigrationChange, MigrationRun, RepoSnapshot, RunStage, TestIntegrityResult, TestResult, RiskAssessment
 from .verdict import VerdictResult
+from .coverage import coverage_changes
 
 REPORT_VERSION = "1.0"
 
@@ -18,6 +19,8 @@ async def build_evidence_report(db: AsyncSession, run: MigrationRun, verdict: Ve
     integrity = list((await db.scalars(select(TestIntegrityResult).where(TestIntegrityResult.run_id == run.id))).all())
     changes = list((await db.scalars(select(MigrationChange).where(MigrationChange.run_id == run.id))).all())
     risk = await db.scalar(select(RiskAssessment).where(RiskAssessment.run_id == run.id).order_by(RiskAssessment.id.desc()))
+    coverage = {variant: next((item.artifacts.get('coverage') for item in reversed(builds) if item.variant == variant), None) for variant in ('baseline', 'migrated')}
+    coverage['changes'] = coverage_changes(coverage['baseline'], coverage['migrated'])
 
     def duration(stage: RunStage) -> float | None:
         if not stage.started_at or not stage.finished_at:
@@ -36,13 +39,14 @@ async def build_evidence_report(db: AsyncSession, run: MigrationRun, verdict: Ve
             "baseline": [{"name": item.test_name, "status": item.status, "duration_seconds": item.duration_seconds, "message": item.message, "flaky": item.flaky} for item in results if item.variant == "baseline"],
             "migrated": [{"name": item.test_name, "status": item.status, "duration_seconds": item.duration_seconds, "message": item.message, "flaky": item.flaky} for item in results if item.variant == "migrated"],
         },
+        'coverage': coverage,
         "integrity_findings": [{"code": item.code, "severity": item.severity, "path": item.path, "message": item.message, "confidence": item.confidence, "evidence": item.evidence, "note": item.note} for item in integrity],
-        "builds": [{"status": item.status, "exit_code": item.exit_code, "log_excerpt": (item.logs or "")[-2000:], "artifacts": item.artifacts} for item in builds],
+        "builds": [{"variant": item.variant, "status": item.status, "exit_code": item.exit_code, "log_excerpt": (item.logs or "")[-2000:], "artifacts": item.artifacts} for item in builds],
         "analysis_findings": [{"code": item.code, "severity": item.severity, "path": item.path, "line_number": item.line_number, "message": item.message, "evidence": item.evidence} for item in findings],
         "dependency_changes": [{"id": change.id, "code": change.code, "path": change.path, "title": change.title, "applied": change.applied} for change in changes],
         "migration_diff": [{"path": change.path, "code": change.code, "diff": change.diff, "applied": change.applied} for change in changes],
         "tool_versions": {"report_schema": REPORT_VERSION},
-        "executed_commands": [],
+        "executed_commands": [{'variant': item.variant, 'command': item.artifacts.get('command', [])} for item in builds],
         "evidence_ledger": [{"reference": stage.evidence_reference, "timestamp": stage.finished_at.isoformat() if stage.finished_at else None} for stage in stages if stage.evidence_reference],
         "limitations": [
             "The report is generated only from persisted database evidence.",

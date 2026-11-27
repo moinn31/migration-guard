@@ -76,6 +76,10 @@ def copy_for_work(snapshot_path: str | Path, destination: str | Path | None = No
     target = Path(destination or tempfile.mkdtemp(prefix="migrationguard-work-")) / "working"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target, dirs_exist_ok=False)
+    # copytree preserves read-only snapshot permissions; only the copy is writable.
+    for path in [target, *target.rglob('*')]:
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode | stat.S_IWUSR)
     return target
 
 

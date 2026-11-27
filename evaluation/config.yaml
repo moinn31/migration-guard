@@ -8,4 +8,5 @@ systems:
   - llm_only
   - migrationguard
 outputs: results/
+reports: [] # Exported /runs/{id}/report JSON files; required for evidence evaluation.
 notes: Deterministic checks decide verdicts; LLM outputs remain unverified evidence.
