@@ -116,7 +116,7 @@ def analyze_codebase_stack(files: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         # Package manager & install command
         if any(p.endswith("pnpm-lock.yaml") for p in paths):
-            install_commands.append("pnpm install || npm install")
+            install_commands.append("pnpm install --no-frozen-lockfile || npm install")
         elif any(p.endswith("yarn.lock") for p in paths):
             install_commands.append("yarn install || npm install")
         elif any(p.endswith("bun.lockb") for p in paths):
@@ -126,10 +126,16 @@ def analyze_codebase_stack(files: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         # Run command from scripts
         scripts = pkg_data.get("scripts", {})
-        if "dev" in scripts:
-            run_command = "npm run dev"
-        elif "start" in scripts:
-            run_command = "npm start"
+        if any(p.endswith("pnpm-lock.yaml") for p in paths):
+            if "dev" in scripts:
+                run_command = "pnpm run dev || npm run dev"
+            elif "start" in scripts:
+                run_command = "pnpm start || npm start"
+        else:
+            if "dev" in scripts:
+                run_command = "npm run dev"
+            elif "start" in scripts:
+                run_command = "npm start"
 
     # Compute target subfolder if manifests live in a subdirectory
     target_cwd = "."

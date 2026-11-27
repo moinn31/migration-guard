@@ -1,6 +1,6 @@
 """Multi-project isolated workspace service running on Azure Container Apps.
 Each project gets its own isolated directory inside /workspace/projects/{project_id}.
-Includes reverse proxy for application dev servers (Next.js, Vite, Python) to enable live preview.
+Includes streaming reverse proxy for application dev servers (Next.js, Vite, Python) to enable high-speed live preview.
 """
 import asyncio
 import os
@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Depends, Query, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 
 BASE_DIR = Path('/workspace/projects')
@@ -64,10 +64,40 @@ class CommandRequest(BaseModel):
     cwd: str = '.'
 
 
+def find_active_dev_port() -> int | None:
+    for port in [3000, 5173, 8000, 5000, 8081, 4000]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.08)
+            if s.connect_ex(('127.0.0.1', port)) == 0:
+                return port
+    return None
+
+
 @app.get('/status', dependencies=api_auth)
 def workspace_status(project_id: str = 'default'):
     root = get_root(project_id)
-    return {'initialized': root.is_dir(), 'project_id': project_id}
+    active_port = find_active_dev_port()
+    has_package_json = (root / 'package.json').is_file()
+    has_node_modules = (root / 'node_modules').is_dir() and (root / 'node_modules/.bin').is_dir()
+    has_requirements = (root / 'requirements.txt').is_file()
+    
+    if has_package_json:
+        deps_installed = has_node_modules
+    elif has_requirements:
+        site_packages = list((root / '.venv').glob('lib/python*/site-packages'))
+        deps_installed = any(len(list(p.iterdir())) > 10 for p in site_packages if p.is_dir())
+    else:
+        deps_installed = has_node_modules
+
+    return {
+        'initialized': root.is_dir(),
+        'project_id': project_id,
+        'dependencies_installed': deps_installed,
+        'has_package_json': has_package_json,
+        'has_node_modules': has_node_modules,
+        'dev_server_running': bool(active_port),
+        'active_port': active_port,
+    }
 
 
 def confined(path: Path, root: Path) -> Path:
@@ -141,6 +171,15 @@ def file(path: str, project_id: str = 'default'):
     if target.stat().st_size > 1_000_000:
         raise HTTPException(413, 'File exceeds viewer limit')
     return {'path': path, 'content': target.read_text(errors='replace'), 'size_bytes': target.stat().st_size, 'is_binary': False}
+
+
+@app.get('/raw_file')
+def raw_file(path: str, project_id: str = 'default'):
+    root = get_root(project_id)
+    target = confined(root / path, root)
+    if not target.is_file():
+        raise HTTPException(404, 'File not found')
+    return FileResponse(target)
 
 
 @app.post('/commands', status_code=202, dependencies=api_auth)
@@ -282,15 +321,6 @@ def delete_project_workspace(project_id: str):
     return {'status': 'deleted', 'project_id': project_id}
 
 
-def find_active_dev_port() -> int | None:
-    for port in [3000, 5173, 8000, 5000, 8081, 4000]:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.1)
-            if s.connect_ex(('127.0.0.1', port)) == 0:
-                return port
-    return None
-
-
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def proxy_preview(request: Request, path: str = ""):
     port = find_active_dev_port()
@@ -304,7 +334,7 @@ async def proxy_preview(request: Request, path: str = ""):
               <p style="color:#8b949e;font-size:0.95rem;line-height:1.5;margin-bottom:1.5rem;">Dev server (port 3000/5173/8000) is launching. This preview updates automatically once ready.</p>
               <button onclick="location.reload()" style="background:#238636;color:white;border:none;padding:8px 18px;border-radius:6px;font-weight:600;cursor:pointer;font-size:0.9rem;">Refresh Preview</button>
             </div>
-            <script>setTimeout(function(){ location.reload(); }, 3000);</script>
+            <script>setTimeout(function(){ location.reload(); }, 2500);</script>
             </body></html>""",
             status_code=503
         )
@@ -318,28 +348,39 @@ async def proxy_preview(request: Request, path: str = ""):
     headers["host"] = f"127.0.0.1:{port}"
 
     body = await request.body()
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        try:
-            proxy_res = await client.request(
-                method=request.method,
-                url=target_url,
-                headers=headers,
-                content=body,
-                follow_redirects=True
-            )
-            
-            # Strip headers that block iframe embedding
-            excluded_headers = {"content-encoding", "content-length", "transfer-encoding", "connection", "x-frame-options", "content-security-policy"}
-            res_headers = {k: v for k, v in proxy_res.headers.items() if k.lower() not in excluded_headers}
-            
-            return Response(
-                content=proxy_res.content,
-                status_code=proxy_res.status_code,
-                headers=res_headers,
-                media_type=proxy_res.headers.get("content-type")
-            )
-        except Exception as exc:
-            return HTMLResponse(
-                f"<html><body><h3>Connecting to port {port}...</h3><p>{exc}</p><script>setTimeout(()=>location.reload(), 2000)</script></body></html>",
-                status_code=502
-            )
+    client = httpx.AsyncClient(timeout=120.0)
+    try:
+        req = client.build_request(
+            method=request.method,
+            url=target_url,
+            headers=headers,
+            content=body
+        )
+        proxy_res = await client.send(req, stream=True)
+
+        excluded_headers = {
+            "content-encoding", "content-length", "transfer-encoding",
+            "connection", "x-frame-options", "content-security-policy"
+        }
+        res_headers = {k: v for k, v in proxy_res.headers.items() if k.lower() not in excluded_headers}
+
+        async def stream_body():
+            try:
+                async for chunk in proxy_res.aiter_bytes():
+                    yield chunk
+            finally:
+                await proxy_res.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            stream_body(),
+            status_code=proxy_res.status_code,
+            headers=res_headers,
+            media_type=proxy_res.headers.get("content-type")
+        )
+    except Exception as exc:
+        await client.aclose()
+        return HTMLResponse(
+            f"<html><body><h3>Connecting to port {port}...</h3><p>{exc}</p><script>setTimeout(()=>location.reload(), 2000)</script></body></html>",
+            status_code=502
+        )

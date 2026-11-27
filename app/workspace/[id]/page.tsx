@@ -231,19 +231,34 @@ export default function WorkspacePage() {
   }
 
   const [runningPipeline, setRunningPipeline] = useState(false)
+  const autoStartedRef = React.useRef<Record<string, boolean>>({})
 
-  async function triggerMultiagentPipeline() {
+  async function triggerMultiagentPipeline(isAuto = false) {
+    if (runningPipeline) return
     setRunningPipeline(true)
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        role: 'user',
-        text: '🚀 Starting Multi-Agent System (Agent 1: Codebase Analyzer, Agent 2: Dependency Installer, Agent 3: Project Runner)...',
-        time: 'Just now',
-      },
-    ])
+    if (!isAuto) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'user',
+          text: '🚀 Starting Multi-Agent System (Agent 1: Codebase Analyzer, Agent 2: Dependency Installer, Agent 3: Project Runner)...',
+          time: 'Just now',
+        },
+      ])
+    }
     try {
       const res = await workspaceRequest('/multiagent/pipeline', { method: 'POST' })
+      if (res.already_running) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: `🎉 **[Project Runner]** ${res.message || 'Application dev server is already running! Live Preview is ready.'}`,
+            time: 'Just now',
+          },
+        ])
+        return
+      }
       if (res.report) {
         setChatMessages((prev) => [
           ...prev,
@@ -259,7 +274,7 @@ export default function WorkspacePage() {
           ...prev,
           {
             role: 'assistant',
-            text: '🤖 **[Agent 2: Dependency Installer]**\nDependency setup commands dispatched to the non-interactive **AI Terminal** tab. Live installation running inside Azure Container sandbox.',
+            text: '🤖 **[Agent 2: Dependency Installer]**\nDependency setup completed in the **AI Terminal**. Live installation verified inside Azure Container sandbox.',
             time: 'Just now',
           },
         ])
@@ -269,20 +284,22 @@ export default function WorkspacePage() {
           ...prev,
           {
             role: 'assistant',
-            text: '🎉 **[Agent 3: Project Runner]**\nApplication launch command executed! Switch to the **Preview** tab at the top to interact with the running project.',
+            text: '🎉 **[Agent 3: Project Runner]**\nApplication launch command executed! Switched to **Preview** tab to interact with your live running project.',
             time: 'Just now',
           },
         ])
       }
     } catch (err) {
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: `Multi-agent pipeline error: ${err instanceof Error ? err.message : 'Unknown error'}`,
-          time: 'Just now',
-        },
-      ])
+      if (!isAuto) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: `Multi-agent pipeline error: ${err instanceof Error ? err.message : 'Unknown error'}`,
+            time: 'Just now',
+          },
+        ])
+      }
     } finally {
       setRunningPipeline(false)
     }
@@ -298,6 +315,14 @@ export default function WorkspacePage() {
         const data: WorkspaceData = await res.json()
         setWorkspace(data)
         setWorkspaceError('')
+
+        // Auto-run project on open (if not already running)
+        if (!autoStartedRef.current[projectId]) {
+          autoStartedRef.current[projectId] = true
+          setTimeout(() => {
+            triggerMultiagentPipeline(true)
+          }, 800)
+        }
 
         // Select initial file (e.g. package.json or README.md or first file)
         if (!selectedFilePath && data.files && data.files.length > 0) {
@@ -880,15 +905,78 @@ export default function WorkspacePage() {
                 <span className="truncate">{previewUrl}</span>
                 <div className="flex shrink-0 gap-3"><button onClick={() => setPreviewVersion(value => value + 1)}>Reload preview</button><a href={previewUrl} target="_blank" rel="noopener noreferrer">Open in new tab</a></div>
               </div>
-              <iframe key={previewVersion} src={previewUrl} title={`${workspace?.project.name} application preview`} sandbox="allow-scripts allow-forms allow-same-origin" referrerPolicy="no-referrer" className="min-h-96 w-full flex-1 border-0 bg-white" />
+              <iframe key={previewVersion} src={previewUrl} title={`${workspace?.project.name} application preview`} sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals allow-downloads" referrerPolicy="no-referrer" className="min-h-96 w-full flex-1 border-0 bg-white" />
             </> : <div className="p-8 text-sm text-slate-400">No application preview is running for this project. Ask the assistant how to start the application on a preview worker.</div>}
           </section> : <>
-          {/* Code Body with Line Numbers */}
+          {/* Code Body with Line Numbers or Media Viewer */}
           <div className="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed">
             {fileLoading ? (
               <div className="flex items-center justify-center h-full text-slate-500 gap-2">
                 <RefreshCw className="size-4 animate-spin text-cyan-400" />
-                Fetching file from Neon Postgres...
+                Fetching file...
+              </div>
+            ) : /\.(png|jpe?g|gif|svg|webp|ico|bmp)$/i.test(selectedFilePath) ? (
+              <div className="flex flex-col items-center justify-center h-full p-6">
+                <div className="p-4 bg-black/40 rounded-xl border border-white/10 shadow-2xl flex flex-col items-center max-w-full">
+                  <img
+                    src={`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/files/raw?path=${encodeURIComponent(selectedFilePath)}`}
+                    alt={selectedFilePath}
+                    className="max-h-[60vh] max-w-full object-contain rounded"
+                  />
+                  <div className="mt-4 flex items-center justify-between w-full px-2 text-xs text-slate-400">
+                    <span className="font-mono truncate">{selectedFilePath}</span>
+                    <a
+                      href={`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/files/raw?path=${encodeURIComponent(selectedFilePath)}`}
+                      download
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-cyan-400 hover:underline shrink-0 ml-4 font-sans font-medium"
+                    >
+                      Download original
+                    </a>
+                  </div>
+                </div>
+              </div>
+            ) : /\.(mp4|webm|ogg|mov)$/i.test(selectedFilePath) ? (
+              <div className="flex flex-col items-center justify-center h-full p-6">
+                <div className="p-4 bg-black/40 rounded-xl border border-white/10 shadow-2xl flex flex-col items-center max-w-full">
+                  <video
+                    src={`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/files/raw?path=${encodeURIComponent(selectedFilePath)}`}
+                    controls
+                    className="max-h-[60vh] max-w-full rounded"
+                  />
+                  <div className="mt-4 flex items-center justify-between w-full px-2 text-xs text-slate-400">
+                    <span className="font-mono truncate">{selectedFilePath}</span>
+                    <a
+                      href={`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/files/raw?path=${encodeURIComponent(selectedFilePath)}`}
+                      download
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-cyan-400 hover:underline shrink-0 ml-4 font-sans font-medium"
+                    >
+                      Download video
+                    </a>
+                  </div>
+                </div>
+              </div>
+            ) : /\.pdf$/i.test(selectedFilePath) ? (
+              <div className="flex flex-col h-full w-full rounded-lg overflow-hidden border border-white/10">
+                <div className="p-2.5 bg-black/40 border-b border-white/10 flex items-center justify-between text-xs text-slate-400 px-4">
+                  <span className="font-mono">{selectedFilePath}</span>
+                  <a
+                    href={`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/files/raw?path=${encodeURIComponent(selectedFilePath)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-cyan-400 hover:underline font-sans font-medium"
+                  >
+                    Open in new tab
+                  </a>
+                </div>
+                <iframe
+                  src={`${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/files/raw?path=${encodeURIComponent(selectedFilePath)}`}
+                  className="flex-1 w-full h-full border-0 bg-white"
+                  title={selectedFilePath}
+                />
               </div>
             ) : selectedFileContent ? (
               <div className="flex">

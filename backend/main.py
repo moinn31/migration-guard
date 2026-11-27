@@ -251,6 +251,44 @@ async def get_file_content(
         is_binary=record.is_binary
     )
 
+@app.get('/api/projects/{project_id}/files/raw')
+async def get_raw_file(
+    project_id: str,
+    path: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    await owned_project(project_id, user, db)
+    endpoint = get_azure_workspace(project_id)
+    if endpoint:
+        url = endpoint.get('url', '').rstrip('/')
+        target_url = f"{url}/raw_file?path={urllib.parse.quote(path)}&project_id={urllib.parse.quote(project_id)}"
+        client = httpx.AsyncClient(timeout=30.0)
+        try:
+            req = client.build_request("GET", target_url, headers={'Authorization': 'Bearer ' + endpoint['token']})
+            res = await client.send(req, stream=True)
+            if res.status_code == 200:
+                async def stream_file():
+                    try:
+                        async for chunk in res.aiter_bytes():
+                            yield chunk
+                    finally:
+                        await res.aclose()
+                        await client.aclose()
+                return StreamingResponse(stream_file(), media_type=res.headers.get("content-type", "application/octet-stream"))
+            await res.aclose()
+            await client.aclose()
+        except Exception:
+            pass
+
+    # Fallback to local workspace files
+    from .terminal_service import get_project_dir
+    local_path = get_project_dir(project_id) / path
+    if not local_path.is_file():
+        raise HTTPException(404, "File not found")
+    from fastapi.responses import FileResponse
+    return FileResponse(local_path)
+
 @app.get('/api/projects/{project_id}/workspace')
 async def get_project_workspace(
     project_id: str,
@@ -266,6 +304,14 @@ async def get_project_workspace(
     files = list((await db.scalars(
         select(ProjectFile).where(ProjectFile.project_id == project_id).order_by(ProjectFile.path)
     )).all())
+
+    ws_status = {}
+    if get_azure_workspace(project_id):
+        try:
+            ws_status = await remote_workspace(project_id, 'GET', f'/status?project_id={project_id}')
+        except Exception:
+            pass
+
     return {
         "project": {
             "id": project.id,
@@ -282,10 +328,12 @@ async def get_project_workspace(
             "verdict": latest_run.verdict,
         } if latest_run else None,
         "files_count": len(files),
-        'preview_url': settings.project_previews.get(project_id),
+        'preview_url': 'https://ca-workspace.jollywater-d76a80b2.centralindia.azurecontainerapps.io',
         'terminal_enabled': settings.workspace_execution_enabled or bool(get_azure_workspace(project_id)),
         'verification_enabled': execution_enabled(project_id),
         'agent_mode': 'camber' if settings.camber_chat_agent and (settings.camber_mcp_access_token or settings.camber_api_key) else 'local_analysis',
+        'is_dev_running': ws_status.get('dev_server_running', False),
+        'dependencies_installed': ws_status.get('dependencies_installed', False),
         "files": [
             {"id": f.id, "path": f.path, "size_bytes": f.size_bytes, "is_binary": f.is_binary}
             for f in files
@@ -428,15 +476,31 @@ async def trigger_multiagent_pipeline(project_id: str, user: User = Depends(curr
     
     # Determine Copilot-style AI terminal ID (e.g. ai-terminal, or ai-terminal-2 if busy)
     target_ai_terminal = 'ai-terminal'
+    ws_state = {}
     if get_azure_workspace(project_id):
         try:
-            state = await remote_workspace(project_id, 'GET', f'/status?project_id={project_id}')
-            if not state.get('initialized') and project.repository_url:
+            ws_state = await remote_workspace(project_id, 'GET', f'/status?project_id={project_id}')
+            if not ws_state.get('initialized') and project.repository_url:
                 await remote_workspace(project_id, 'POST', '/import', {
                     'repository_url': project.repository_url,
                     'github_token': settings.github_token,
                     'project_id': project_id,
                 })
+                ws_state = await remote_workspace(project_id, 'GET', f'/status?project_id={project_id}')
+            
+            # If application dev server is already running, skip re-running!
+            if ws_state.get('dev_server_running'):
+                settings.project_previews[project_id] = 'https://ca-workspace.jollywater-d76a80b2.centralindia.azurecontainerapps.io'
+                return {
+                    'analysis': analysis,
+                    'report': report_text,
+                    'already_running': True,
+                    'active_port': ws_state.get('active_port'),
+                    'message': f"Application is already running on port {ws_state.get('active_port')}. Preview window is ready!",
+                    'terminal_id': target_ai_terminal,
+                    'install_jobs': [],
+                    'run_job': None
+                }
             
             existing_jobs = await remote_workspace(project_id, 'GET', f'/commands?project_id={project_id}')
             running_ai_ids = {
@@ -452,10 +516,11 @@ async def trigger_multiagent_pipeline(project_id: str, user: User = Depends(curr
         except Exception:
             pass
 
-    # Agent 2: Install dependencies in non-interactive AI terminal
+    # Agent 2: Install dependencies in non-interactive AI terminal ONLY if not already installed
     install_jobs = []
     install_success = True
-    if get_azure_workspace(project_id) and analysis.get('install_commands'):
+    needs_install = not ws_state.get('dependencies_installed')
+    if needs_install and get_azure_workspace(project_id) and analysis.get('install_commands'):
         for cmd in analysis['install_commands']:
             job = await remote_workspace(project_id, 'POST', '/commands', {
                 'command': cmd,
