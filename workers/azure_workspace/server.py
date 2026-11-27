@@ -283,30 +283,91 @@ def public_job(job):
     return {key: value for key, value in job.items() if not key.startswith('_')}
 
 
+def kill_job_process(job: dict):
+    """Aggressively terminate process, process group, and asyncio task."""
+    proc = job.get('_process')
+    if proc:
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    task = job.get('_task')
+    if task and not task.done():
+        task.cancel()
+
+
+async def release_dev_ports():
+    """Kill any process holding onto web development ports (3000, 5173, 8000, 5000, 8081, 4000)."""
+    for port in [3000, 5173, 8000, 5000, 8081, 4000]:
+        try:
+            p = await asyncio.create_subprocess_shell(
+                f"fuser -k -9 {port}/tcp 2>/dev/null || true",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await p.wait()
+        except Exception:
+            pass
+
+
 @app.delete('/commands/{job_id}', dependencies=api_auth)
 async def cancel_command(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, 'Command not found')
-    task = job.get('_task')
-    if task and not task.done():
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        job['status'] = 'cancelled'
+    kill_job_process(job)
+    job.update(status='cancelled', exit_code=137, output=job.get('output', '') + '\n[Process stopped by user]')
+    if any(k in job.get('command', '') for k in ['npm run dev', 'next dev', 'vite', 'python', 'uvicorn', 'yarn dev', 'pnpm dev']):
+        await release_dev_ports()
     return public_job(job)
 
 
+@app.post('/projects/{project_id}/kill-all', dependencies=api_auth)
+@app.post('/kill-all', dependencies=api_auth)
+async def kill_all_project_processes(project_id: str = 'default'):
+    root = get_root(project_id)
+    killed_count = 0
+    for jid, job in list(jobs.items()):
+        if project_id in ('all', 'default') or job.get('project_id') == project_id or not job.get('project_id'):
+            if job.get('status') == 'running':
+                kill_job_process(job)
+                job.update(status='cancelled', exit_code=137, output=job.get('output', '') + '\n[Process killed: terminal reset]')
+                killed_count += 1
+
+    try:
+        p = await asyncio.create_subprocess_shell(
+            f"pkill -9 -f '{str(root)}' 2>/dev/null || pkill -9 -f 'next dev' 2>/dev/null || pkill -9 -f 'vite' 2>/dev/null || pkill -9 -f 'npm run dev' 2>/dev/null || true",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await p.wait()
+    except Exception:
+        pass
+
+    await release_dev_ports()
+    return {'status': 'all_processes_killed', 'project_id': project_id, 'killed_jobs': killed_count}
+
+
 @app.delete('/projects/{project_id}/commands', dependencies=api_auth)
-def clear_project_commands(project_id: str, terminal_id: str | None = None):
+async def clear_project_commands(project_id: str, terminal_id: str | None = None):
     to_delete = [
         jid for jid, j in jobs.items()
         if j.get('project_id') == project_id and (not terminal_id or j.get('terminal_id') == terminal_id)
     ]
     for jid in to_delete:
-        task = jobs[jid].get('_task')
-        if task and not task.done():
-            task.cancel()
+        job = jobs[jid]
+        kill_job_process(job)
         jobs.pop(jid, None)
+    if not terminal_id or 'ai-terminal' in str(terminal_id):
+        await release_dev_ports()
     return {'status': 'cleared', 'count': len(to_delete)}
 
 

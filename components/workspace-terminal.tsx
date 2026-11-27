@@ -386,6 +386,24 @@ export function WorkspaceTerminal({
     }
   }
 
+  const [isKilling, setIsKilling] = useState(false)
+
+  // Kill all terminals and stop server immediately
+  const handleKillAll = async () => {
+    setIsKilling(true)
+    setErrorMsg('')
+    try {
+      await workspaceRequest('/terminal/kill-all', { method: 'POST' })
+      const updated = await workspaceRequest('/terminal/jobs')
+      setJobs(updated)
+      setRunningJobId(null)
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to kill processes')
+    } finally {
+      setIsKilling(false)
+    }
+  }
+
   // Stop running command
   const handleStopCommand = async () => {
     if (!runningJobId) return
@@ -496,17 +514,20 @@ export function WorkspaceTerminal({
             <span>Azure Cloud Sandbox</span>
           </div>
 
-          {/* Running Job Stop Button */}
-          {runningJobId && (
-            <button
-              onClick={handleStopCommand}
-              className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-500/20 border border-red-500/30 text-red-300 hover:bg-red-500/30 text-[11px] font-mono transition-colors"
-              title="Stop running command"
-            >
-              <Square className="size-2.5 fill-current" />
-              <span>Stop</span>
-            </button>
-          )}
+          {/* Kill Terminal / Stop Server Button */}
+          <button
+            onClick={handleKillAll}
+            disabled={isKilling}
+            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded border text-[11px] font-mono font-medium transition-all shadow-sm ${
+              jobs.some((j) => j.status === 'running' || j.status === 'queued') || runningJobId
+                ? 'bg-red-600 hover:bg-red-500 text-white border-red-500 shadow-red-900/30'
+                : 'bg-red-950/40 hover:bg-red-900/60 text-red-300 border-red-500/30'
+            }`}
+            title="Kill all running processes (Next.js/Node/Python dev servers) and free ports"
+          >
+            <Square className="size-2.5 fill-current" />
+            <span>{isKilling ? 'Killing...' : 'Kill Terminal'}</span>
+          </button>
 
           {/* Clear Button */}
           <button

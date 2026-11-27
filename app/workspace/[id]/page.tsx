@@ -187,6 +187,34 @@ export default function WorkspacePage() {
     setJobs([])
   }, [projectId])
 
+  // Project Lifecycle auto-cleanup:
+  // When closing tab, refreshing, or navigating away, automatically kill all terminals & processes for this project
+  useEffect(() => {
+    if (!projectId) return
+
+    const killProjectTerminals = () => {
+      try {
+        const url = `${process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'}/api/projects/${projectId}/terminal/kill-all`
+        if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+          navigator.sendBeacon(url)
+        } else {
+          fetch(url, { method: 'POST', keepalive: true }).catch(() => {})
+        }
+      } catch (err) {
+        // ignore background unload errors
+      }
+    }
+
+    window.addEventListener('beforeunload', killProjectTerminals)
+    window.addEventListener('pagehide', killProjectTerminals)
+
+    return () => {
+      window.removeEventListener('beforeunload', killProjectTerminals)
+      window.removeEventListener('pagehide', killProjectTerminals)
+      killProjectTerminals()
+    }
+  }, [projectId])
+
   const handleErrorCaptured = (err: { id: string; command: string; output: string; exit_code?: number | null; sentry_event_id?: string }) => {
     if (alertedJobIdsRef.current.has(err.id)) return
     alertedJobIdsRef.current.add(err.id)

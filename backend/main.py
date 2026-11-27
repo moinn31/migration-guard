@@ -633,6 +633,26 @@ async def cancel_terminal_job(project_id: str, job_id: str, user: User = Depends
     await terminal_manager.cancel(job)
     return job.public()
 
+@app.post('/api/projects/{project_id}/terminal/kill-all')
+async def kill_all_project_terminals(project_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    await owned_project(project_id, user, db)
+    if get_azure_workspace(project_id):
+        try:
+            await remote_workspace(project_id, 'POST', f'/projects/{project_id}/kill-all')
+        except Exception as e:
+            logger.warning(f"Failed to kill all on Azure: {e}")
+
+    for job in list(terminal_manager.jobs.values()):
+        if job.project_id == project_id:
+            try:
+                await terminal_manager.cancel(job)
+            except Exception:
+                pass
+
+    settings.project_previews.pop(project_id, None)
+    return {'status': 'all_processes_killed', 'project_id': project_id}
+
+
 @app.delete('/api/projects/{project_id}/terminal/clear')
 async def clear_project_terminal(project_id: str, terminal_id: str | None = None, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await owned_project(project_id, user, db)
