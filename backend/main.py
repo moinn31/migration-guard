@@ -283,7 +283,7 @@ async def get_project_workspace(
         } if latest_run else None,
         "files_count": len(files),
         'preview_url': settings.project_previews.get(project_id),
-        'terminal_enabled': settings.workspace_execution_enabled,
+        'terminal_enabled': settings.workspace_execution_enabled or bool(get_azure_workspace(project_id)),
         'verification_enabled': execution_enabled(project_id),
         'agent_mode': 'camber' if settings.camber_chat_agent and (settings.camber_mcp_access_token or settings.camber_api_key) else 'local_analysis',
         "files": [
@@ -342,8 +342,20 @@ class TerminalCommand(BaseModel):
     cwd: str = '.'
     auto_repair: bool = True
 
+def get_azure_workspace(project_id: str) -> dict | None:
+    if project_id in settings.azure_workspaces:
+        return settings.azure_workspaces[project_id]
+    if settings.azure_default_workspace_url and settings.azure_default_workspace_token:
+        return {
+            'url': settings.azure_default_workspace_url,
+            'token': settings.azure_default_workspace_token,
+        }
+    return None
+
 async def remote_workspace(project_id: str, method: str, path: str, body: dict | None = None):
-    endpoint = settings.azure_workspaces[project_id]
+    endpoint = get_azure_workspace(project_id)
+    if not endpoint:
+        raise HTTPException(503, 'No Azure workspace configured')
     url = endpoint.get('url', '').rstrip('/')
     if not url.startswith('https://') or not endpoint.get('token'):
         raise HTTPException(503, 'Azure workspace requires an HTTPS URL and token')
@@ -374,18 +386,39 @@ async def workspace_chat(project_id: str, data: WorkspaceMessage, user: User = D
         raise HTTPException(503, str(exc)) from exc
     return {'reply': reply, 'mode': 'camber'}
 
+_initialized_azure_workspaces: set[str] = set()
+
 @app.post('/api/projects/{project_id}/terminal/jobs', status_code=202)
 async def start_terminal_job(project_id: str, data: TerminalCommand, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     project = await owned_project(project_id, user, db)
-    if not settings.workspace_execution_enabled:
+    if get_azure_workspace(project_id):
+        pass
+    elif not settings.workspace_execution_enabled:
         raise HTTPException(503, 'Workspace execution is disabled. Enable only on an isolated worker host.')
-    if project_id in settings.azure_workspaces:
-        state = await remote_workspace(project_id, 'GET', '/status')
-        if not state['initialized']:
-            if not project.repository_url:
-                raise HTTPException(409, 'Remote workspace requires a repository URL')
-            await remote_workspace(project_id, 'POST', '/import', {'repository_url': project.repository_url, 'github_token': settings.github_token})
+    if get_azure_workspace(project_id):
+        # Fast path: only check status and run import if we haven't initialized this session
+        if project_id not in _initialized_azure_workspaces:
+            state = await remote_workspace(project_id, 'GET', '/status')
+            if not state.get('initialized'):
+                if not project.repository_url:
+                    raise HTTPException(409, 'Remote workspace requires a repository URL')
+                await remote_workspace(project_id, 'POST', '/import', {'repository_url': project.repository_url, 'github_token': settings.github_token})
+            _initialized_azure_workspaces.add(project_id)
+
         job = await remote_workspace(project_id, 'POST', '/commands', {'command': data.command, 'terminal_id': data.terminal_id, 'cwd': data.cwd})
+
+        # Instant completion: wait a brief slice (250ms) for quick commands (ls, pwd, cd, etc.) to complete
+        if job.get('status') == 'running':
+            await asyncio.sleep(0.25)
+            try:
+                commands = await remote_workspace(project_id, 'GET', '/commands')
+                for c in commands:
+                    if c.get('id') == job.get('id'):
+                        job = c
+                        break
+            except Exception:
+                pass
+
         return remote_job(job)
     root = await hydrate_project_files_if_needed(project_id, db)
     context = await analyze_project_context(project_id, db)
@@ -397,14 +430,15 @@ async def start_terminal_job(project_id: str, data: TerminalCommand, user: User 
 @app.get('/api/projects/{project_id}/terminal/jobs')
 async def list_terminal_jobs(project_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await owned_project(project_id, user, db)
-    if project_id in settings.azure_workspaces:
+    if get_azure_workspace(project_id):
+        _initialized_azure_workspaces.add(project_id)
         return [remote_job(job) for job in await remote_workspace(project_id, 'GET', '/commands')]
     return [job.public() for job in terminal_manager.jobs.values() if job.project_id == project_id]
 
 @app.delete('/api/projects/{project_id}/terminal/jobs/{job_id}')
 async def cancel_terminal_job(project_id: str, job_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await owned_project(project_id, user, db)
-    if project_id in settings.azure_workspaces:
+    if get_azure_workspace(project_id):
         return remote_job(await remote_workspace(project_id, 'DELETE', '/commands/' + urllib.parse.quote(job_id, safe='')))
     job = terminal_manager.jobs.get(job_id)
     if not job or job.project_id != project_id:

@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     backend_public_url: str | None = None
     # Each project gets its own isolated Azure workspace URL and bearer token.
     azure_workspaces: dict[str, dict[str, str]] = {}
+    azure_default_workspace_url: str | None = None
+    azure_default_workspace_token: str | None = None
     project_previews: dict[str, str] = {}
 
     # Azure Container Apps Jobs

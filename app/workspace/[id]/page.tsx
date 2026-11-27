@@ -32,6 +32,7 @@ import {
 } from 'lucide-react'
 import { authenticatedFetch } from '@/lib/api/client'
 import { isolatedPreviewUrl } from '@/lib/preview'
+import { WorkspaceTerminal } from '@/components/workspace-terminal'
 
 interface FileItem {
   id: string
@@ -716,20 +717,11 @@ export default function WorkspacePage() {
             )}
           </div>
           </>}
-          <section className="max-h-72 overflow-auto border-t border-white/10 p-4" aria-label="Workspace terminal">
-            <h2 className="mb-2 text-sm font-semibold text-white">Workspace terminal</h2>
-            {!workspace?.terminal_enabled && <p className="mb-3 text-xs text-slate-400">Command execution is disabled on this host. Use the running Preview or a configured isolated worker.</p>}
-            <form className="flex gap-2" onSubmit={event => { event.preventDefault(); startCommand() }}>
-              <input aria-label="Terminal command" value={commandInput} onChange={event => setCommandInput(event.target.value)} placeholder="Command to run in this project" className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 p-2 text-xs text-white" />
-              <button className="rounded bg-cyan-300 px-3 text-xs text-black disabled:opacity-40" disabled={!commandInput.trim() || !workspace?.terminal_enabled}>Run</button>
-            </form>
-            {terminalError && <p role="alert" className="mt-2 text-xs text-red-300">{terminalError}</p>}
-            {jobs.map(job => <div key={job.id} className="mt-3 rounded border border-white/10 p-2 text-xs text-slate-300">
-              <p>{job.command} — {job.status} {['queued', 'running', 'recovering'].includes(job.status) && <button onClick={() => stopCommand(job.id)} className="ml-2 text-red-300">Stop</button>}</p>
-              <pre className="mt-2 whitespace-pre-wrap">{job.output}</pre>
-              {job.notices.map(notice => <p key={notice.id} className="mt-1 text-amber-200">{notice.text}</p>)}
-            </div>)}
-          </section>
+          <WorkspaceTerminal
+            projectId={projectId}
+            terminalEnabled={Boolean(workspace?.terminal_enabled)}
+            workspaceRequest={workspaceRequest}
+          />
         </main>
       </div>
     </div>
